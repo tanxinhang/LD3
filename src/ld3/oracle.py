@@ -69,9 +69,8 @@ def _ridge_ls(
 
     λ = ridge_relative * tr(A^H A) / L   where L = number of columns.
 
-    Uses augmented least-squares (A_aug = [A; √λ·I]) via np.linalg.lstsq
-    instead of np.linalg.solve on the normal equations.  This avoids MKL
-    crashes on near-singular Gram matrices (observed on Windows + Anaconda).
+    Uses real-valued decomposition of the augmented system to avoid MKL
+    crashes on complex128 matrices (observed on Windows + Anaconda).
     """
     n_cols = A.shape[1]
     if n_cols == 0:
@@ -84,8 +83,20 @@ def _ridge_ls(
     # Augmented system: [A; √λ·I] x ≈ [y; 0]
     A_aug = np.vstack([A, sqrt_ridge * np.eye(n_cols)])
     y_aug = np.concatenate([y, np.zeros(n_cols, dtype=A.dtype)])
-    result, residuals, rank, singulars = np.linalg.lstsq(A_aug, y_aug, rcond=None)
-    return result
+
+    # Split into real-valued system to avoid MKL complex-path SIGABRT.
+    # [Re(A)  -Im(A)] [Re(x)]   [Re(y)]
+    # [Im(A)   Re(A)] [Im(x)] = [Im(y)]
+    A_real = np.block([
+        [A_aug.real, -A_aug.imag],
+        [A_aug.imag,  A_aug.real],
+    ])
+    y_real = np.concatenate([y_aug.real, y_aug.imag])
+    result_real, _residuals, _rank, _singulars = np.linalg.lstsq(
+        A_real, y_real, rcond=None
+    )
+    n = n_cols
+    return result_real[:n] + 1j * result_real[n:]
 
 
 # ---------------------------------------------------------------------------
