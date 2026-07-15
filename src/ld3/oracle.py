@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import numpy as np
 
 from .channel import PathSet, synthesize_tf_channel
@@ -56,8 +57,41 @@ def oracle_perfect_reconstruction(ofdm: OFDMConfig, paths: PathSet) -> np.ndarra
 
 
 # ---------------------------------------------------------------------------
-# Ridge LS helper
+# Ridge LS helper — pure Python, ZERO MKL calls
 # ---------------------------------------------------------------------------
+
+
+def _manual_gram_and_rhs(
+    A: np.ndarray,
+    y: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute gram = A^H @ A  and  rhs = A^H @ y  using pure-Python loops.
+
+    Avoids np.dot / np.matmul / @ which call MKL BLAS ?GEMM and SIGABRT on
+    the target Anaconda/Windows environment.
+    """
+    n_rows = A.shape[0]
+    n_cols = A.shape[1]
+    gram = np.zeros((n_cols, n_cols), dtype=np.complex128)
+    rhs = np.zeros(n_cols, dtype=np.complex128)
+
+    for i in range(n_cols):
+        # rhs[i] = Σ_k conj(A[k,i]) * y[k]
+        s_rhs = 0.0 + 0.0j
+        for k in range(n_rows):
+            s_rhs += A[k, i].conjugate() * y[k]
+        rhs[i] = s_rhs
+
+        for j in range(i, n_cols):
+            # gram[i,j] = Σ_k conj(A[k,i]) * A[k,j]
+            s = 0.0 + 0.0j
+            for k in range(n_rows):
+                s += A[k, i].conjugate() * A[k, j]
+            gram[i, j] = s
+            if i != j:
+                gram[j, i] = s.conjugate()
+
+    return gram, rhs
 
 
 def _ridge_ls(
@@ -67,43 +101,55 @@ def _ridge_ls(
 ) -> np.ndarray:
     """Solve min ||A x - y||² + λ||x||² with trace-scaled regularisation.
 
-    Uses a manual Cholesky solver on the real-valued equivalent of the
-    normal equations.  This avoids ALL MKL LAPACK entry points (solve,
-    lstsq, inv — all of which SIGABRT on this Anaconda/Windows combo).
+    Uses PURE PYTHON linear algebra throughout — no BLAS, no LAPACK, no
+    MKL of any kind.  This is the only way to survive the SIGABRT-happy
+    Anaconda/Windows numpy build.
     """
     n_cols = A.shape[1]
     if n_cols == 0:
         return np.zeros(0, dtype=np.complex128)
 
-    # Normal equations: (A^H A + λI) x = A^H y
-    gram = A.conj().T @ A
-    trace_gram = float(np.trace(gram).real)
+    # Manual A^H A  and  A^H y  (no @, no np.dot)
+    gram, rhs = _manual_gram_and_rhs(A, y)
+
+    # Trace (manual, no np.trace)
+    trace_gram = 0.0
+    for i in range(n_cols):
+        trace_gram += float(gram[i, i].real)
+
     ridge = ridge_relative * trace_gram / max(n_cols, 1)
-    G = gram + ridge * np.eye(n_cols)          # L×L complex Hermitian SPD
-    rhs = A.conj().T @ y                        # complex, shape (L,)
+    for i in range(n_cols):
+        gram[i, i] += ridge
 
     # Real equivalent: 2L × 2L real SPD system
-    G_real = np.block([
-        [G.real, -G.imag],
-        [G.imag,  G.real],
-    ])
-    rhs_real = np.concatenate([rhs.real, rhs.imag])
+    dim = 2 * n_cols
+    G_real = np.zeros((dim, dim), dtype=np.float64)
+    rhs_real = np.zeros(dim, dtype=np.float64)
+
+    for i in range(n_cols):
+        rhs_real[i] = float(rhs[i].real)
+        rhs_real[i + n_cols] = float(rhs[i].imag)
+        for j in range(n_cols):
+            g_re = float(gram[i, j].real)
+            g_im = float(gram[i, j].imag)
+            G_real[i, j] = g_re
+            G_real[i, j + n_cols] = -g_im
+            G_real[i + n_cols, j] = g_im
+            G_real[i + n_cols, j + n_cols] = g_re
 
     x_real = _solve_spd_cholesky(G_real, rhs_real)
-    n = n_cols
-    return x_real[:n] + 1j * x_real[n:]
+    return x_real[:n_cols] + 1j * x_real[n_cols:]
 
 
 def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Solve Ax = b for a real SPD matrix A using manual Cholesky.
 
-    Uses ONLY element-wise numpy operations — no LAPACK calls.
-    Safe on MKL-crashing Anaconda/Windows environments.
+    Uses ONLY Python float + math.sqrt — no numpy linear-algebra calls.
     """
     n = A.shape[0]
     L = np.zeros((n, n), dtype=np.float64)
 
-    # Cholesky: A = L @ L^T  (in-place construction)
+    # Cholesky: A = L @ L^T
     for i in range(n):
         for j in range(i + 1):
             s = float(A[i, j])
@@ -112,7 +158,7 @@ def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
             if i == j:
                 if s <= 0.0:
                     s = np.finfo(np.float64).eps
-                L[i, j] = np.sqrt(s)
+                L[i, j] = math.sqrt(s)       # math.sqrt, NOT np.sqrt
             else:
                 L[i, j] = s / L[j, j]
 
