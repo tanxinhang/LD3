@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 import numpy as np
 
 from .channel import PathSet, synthesize_tf_channel
@@ -61,6 +62,18 @@ def oracle_perfect_reconstruction(ofdm: OFDMConfig, paths: PathSet) -> np.ndarra
 # ---------------------------------------------------------------------------
 
 
+def _col_norms(A: np.ndarray) -> np.ndarray:
+    """Compute per-column L2 norms manually (no np.linalg.norm, no BLAS)."""
+    n_rows, n_cols = A.shape
+    norms = np.zeros(n_cols, dtype=np.float64)
+    for j in range(n_cols):
+        s = 0.0
+        for i in range(n_rows):
+            s += float((A[i, j].real ** 2) + (A[i, j].imag ** 2))
+        norms[j] = math.sqrt(s)
+    return norms
+
+
 def _manual_gram_and_rhs(
     A: np.ndarray,
     y: np.ndarray,
@@ -76,14 +89,12 @@ def _manual_gram_and_rhs(
     rhs = np.zeros(n_cols, dtype=np.complex128)
 
     for i in range(n_cols):
-        # rhs[i] = Σ_k conj(A[k,i]) * y[k]
         s_rhs = 0.0 + 0.0j
         for k in range(n_rows):
             s_rhs += A[k, i].conjugate() * y[k]
         rhs[i] = s_rhs
 
         for j in range(i, n_cols):
-            # gram[i,j] = Σ_k conj(A[k,i]) * A[k,j]
             s = 0.0 + 0.0j
             for k in range(n_rows):
                 s += A[k, i].conjugate() * A[k, j]
@@ -101,15 +112,17 @@ def _ridge_ls(
 ) -> np.ndarray:
     """Solve min ||A x - y||² + λ||x||² with trace-scaled regularisation.
 
+    Columns of A should be approximately unit-norm so that ridge strength
+    is comparable across different pilot densities (callers normalise A
+    before passing it in).
+
     Uses PURE PYTHON linear algebra throughout — no BLAS, no LAPACK, no
-    MKL of any kind.  This is the only way to survive the SIGABRT-happy
-    Anaconda/Windows numpy build.
+    MKL of any kind.
     """
     n_cols = A.shape[1]
     if n_cols == 0:
         return np.zeros(0, dtype=np.complex128)
 
-    # Manual A^H A  and  A^H y  (no @, no np.dot)
     gram, rhs = _manual_gram_and_rhs(A, y)
 
     # Trace (manual, no np.trace)
@@ -145,11 +158,15 @@ def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Solve Ax = b for a real SPD matrix A using manual Cholesky.
 
     Uses ONLY Python float + math.sqrt — no numpy linear-algebra calls.
+
+    Issues a RuntimeWarning if the matrix is numerically singular (diagonal
+    element ≤ 0 during decomposition), which indicates the LS problem is
+    ill-conditioned and the result should not be trusted.
     """
     n = A.shape[0]
     L = np.zeros((n, n), dtype=np.float64)
 
-    # Cholesky: A = L @ L^T
+    singular = False
     for i in range(n):
         for j in range(i + 1):
             s = float(A[i, j])
@@ -157,10 +174,22 @@ def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
                 s -= L[i, k] * L[j, k]
             if i == j:
                 if s <= 0.0:
-                    s = np.finfo(np.float64).eps
-                L[i, j] = math.sqrt(s)       # math.sqrt, NOT np.sqrt
+                    singular = True
+                    # Use a fallback small enough to not dominate but large
+                    # enough to avoid amplifying errors catastrophically.
+                    # The result is still unreliable; we warn below.
+                    s = float(np.finfo(np.float64).eps)
+                L[i, j] = math.sqrt(s)
             else:
                 L[i, j] = s / L[j, j]
+
+    if singular:
+        warnings.warn(
+            "_solve_spd_cholesky: matrix is numerically singular — "
+            "LS solution is unreliable.  This usually indicates "
+            "near-identical DD dictionary columns (path ambiguity).",
+            RuntimeWarning,
+        )
 
     # Forward substitution: L @ y = b
     y = np.zeros(n, dtype=np.float64)
@@ -181,6 +210,20 @@ def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
     return x
 
 
+def _dict_condition_estimate(A: np.ndarray) -> float:
+    """Estimate the condition number of the LS dictionary A.
+
+    Uses the ratio of largest to smallest column norm as a cheap proxy.
+    Returns inf if any column has zero norm.
+    """
+    col_norms = _col_norms(A)
+    c_min = float(np.min(col_norms))
+    c_max = float(np.max(col_norms))
+    if c_min < np.finfo(np.float64).eps:
+        return float("inf")
+    return c_max / c_min
+
+
 # ---------------------------------------------------------------------------
 # Oracle support + LS complex-gain
 # ---------------------------------------------------------------------------
@@ -197,6 +240,9 @@ def oracle_support_ls_reconstruction(
     Given TRUE DD path locations {τ, ν}, estimate complex gains via
     trace-regularised LS on raw pilot observations, then reconstruct the
     full TF channel.
+
+    Dictionary columns are normalised so that ridge regularisation strength
+    is independent of pilot density and path count.
 
     NMSE(·, H_true) isolates the gain-estimation error Δ_gain:
         Δ_gain = NMSE(oracle_support_ls) - NMSE(oracle_perfect)
@@ -221,10 +267,28 @@ def oracle_support_ls_reconstruction(
         doppler_phase = np.exp(2j * np.pi * m_idx * paths.doppler_bins[l] / n_sym)
         A_pilot[:, l] = delay_phase * doppler_phase
 
+    # Column-normalise so ridge strength is consistent across pilot densities
+    _normalise_columns(A_pilot)
+
     y = pilot_observations[pilot_mask]
     g_hat = _ridge_ls(A_pilot, y)
 
-    # Reconstruct full TF channel with estimated gains
+    # Undo normalisation: each g_hat[l] was estimated with a normalised column,
+    # so the true gain = g_hat[l] / original_norm[l].
+    # Since we passed the normalised A to _ridge_ls, the solution is in the
+    # normalised basis.  We compensate during reconstruction by using the
+    # original (unnormalised) dictionary, which is what _synthesize_from_params
+    # does anyway.  BUT:  g_hat is the gain for unit-norm columns.  The
+    # true channel contribution of path l is  α_l * a_l (where ||a_l|| = √N_p).
+    # After normalisation,  α_l * a_l = (α_l * ||a_l||) * (a_l / ||a_l||).
+    # So g_hat[l] ≈ α_l * ||a_l||, and we must divide g_hat[l] by ||a_l||
+    # when passing to _synthesize_from_params (which uses unnormalised phases).
+    col_norms = _col_norms(
+        _build_raw_dict(n_sc, n_sym, n_idx, m_idx,
+                        paths.delay_bins, paths.doppler_bins)
+    )
+    g_hat = g_hat / np.maximum(col_norms, np.finfo(np.float64).eps)
+
     return _synthesize_from_params(
         n_sc, n_sym, paths.delay_bins, paths.doppler_bins, g_hat
     )
@@ -243,9 +307,8 @@ def estimated_support_ls_reconstruction(
 ) -> np.ndarray:
     """DD-estimated support + LS complex-gain reconstruction.
 
-    Uses DD-ESTIMATED (not true) path locations.  This bridges Gate 0 and
-    Gate 1: it measures how well DD-identified support translates to TF
-    channel NMSE.
+    Uses DD-ESTIMATED (not true) path locations.  Dictionary columns are
+    normalised for ridge-consistent LS.
 
     NMSE(·, H_true) isolates the support-estimation error Δ_support:
         Δ_support = NMSE(estimated_support_ls) - NMSE(oracle_support_ls)
@@ -263,18 +326,61 @@ def estimated_support_ls_reconstruction(
     if n_idx.size == 0:
         raise ValueError("pilot mask contains no observations")
 
-    A_pilot = np.zeros((n_idx.size, n_paths), dtype=np.complex128)
-    for l in range(n_paths):
-        delay_phase = np.exp(-2j * np.pi * n_idx * est.delay_bins[l] / n_sc)
-        doppler_phase = np.exp(2j * np.pi * m_idx * est.doppler_bins[l] / n_sym)
-        A_pilot[:, l] = delay_phase * doppler_phase
+    # Build dictionary at pilot locations using ESTIMATED path parameters
+    A_pilot = _build_raw_dict(
+        n_sc, n_sym, n_idx, m_idx, est.delay_bins, est.doppler_bins,
+    )
+
+    # Estimate condition as a diagnostic (cheap)
+    cond_est = _dict_condition_estimate(A_pilot)
+    if cond_est > 1e6:
+        warnings.warn(
+            f"estimated_support_ls: dictionary condition estimate = {cond_est:.1e} "
+            f"— near-identical DD columns may inflate NMSE.",
+            RuntimeWarning,
+        )
+
+    _normalise_columns(A_pilot)
 
     y = pilot_observations[pilot_mask]
     g_hat = _ridge_ls(A_pilot, y)
 
+    # Undo normalisation (see oracle_support_ls_reconstruction for explanation)
+    col_norms = _col_norms(
+        _build_raw_dict(n_sc, n_sym, n_idx, m_idx,
+                        est.delay_bins, est.doppler_bins)
+    )
+    g_hat = g_hat / np.maximum(col_norms, np.finfo(np.float64).eps)
+
     return _synthesize_from_params(
         n_sc, n_sym, est.delay_bins, est.doppler_bins, g_hat
     )
+
+
+def _build_raw_dict(
+    n_sc: int,
+    n_sym: int,
+    n_idx: np.ndarray,
+    m_idx: np.ndarray,
+    delay_bins: np.ndarray,
+    doppler_bins: np.ndarray,
+) -> np.ndarray:
+    """Build the (unnormalised) DD dictionary at pilot locations."""
+    n_paths = len(delay_bins)
+    A = np.zeros((n_idx.size, n_paths), dtype=np.complex128)
+    for l in range(n_paths):
+        delay_phase = np.exp(-2j * np.pi * n_idx * delay_bins[l] / n_sc)
+        doppler_phase = np.exp(2j * np.pi * m_idx * doppler_bins[l] / n_sym)
+        A[:, l] = delay_phase * doppler_phase
+    return A
+
+
+def _normalise_columns(A: np.ndarray) -> None:
+    """In-place column normalisation to unit L2 norm."""
+    norms = _col_norms(A)
+    for j in range(A.shape[1]):
+        if norms[j] > np.finfo(np.float64).eps:
+            A[:, j] /= norms[j]
 
 
 def _synthesize_from_params(
@@ -311,28 +417,66 @@ def perturb_tokens(
     max_delay_bins: float = 12.0,
     max_abs_doppler_bins: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Inject controlled prior errors for Gate 2 experiments."""
+    """Inject controlled prior errors for Gate 2 experiments.
+
+    Processing order:
+      1. Perturb active paths' delay/Doppler with Gaussian noise → clip to
+         physical range.
+      2. Update sigma fields and confidence.
+      3. Mark missed paths (valid=False).
+      4. Inject false paths into free slots.  The number actually injected
+         is min(false_paths, available_free_slots).  If fewer slots are
+         available than requested, a RuntimeWarning is issued.
+    """
 
     out = tokens.copy()
     out_valid = valid.copy()
+    max_paths = out.shape[0]
+    n_active_orig = int(np.sum(out_valid))
+
+    # ---- step 1: perturb active paths ----
     active = np.flatnonzero(out_valid)
     if active.size:
         out[active, 0] += rng.normal(0.0, delay_std, size=active.size)
         out[active, 1] += rng.normal(0.0, doppler_std, size=active.size)
-        missed = rng.random(active.size) < miss_probability
-        out_valid[active[missed]] = False
+
+        # Clip to physical range
+        out[active, 0] = np.clip(out[active, 0], 0.0, max_delay_bins)
+        out[active, 1] = np.clip(
+            out[active, 1], -max_abs_doppler_bins, max_abs_doppler_bins
+        )
+
+        # ---- step 2: update sigma + confidence ----
         out[active, 4] = delay_std
         out[active, 5] = doppler_std
-        confidence = np.exp(-0.5 * (delay_std**2 + doppler_std**2))
+        confidence = math.exp(-0.5 * (delay_std**2 + doppler_std**2))
         out[active, 3] = confidence
 
+        # ---- step 3: mark missed paths ----
+        missed = rng.random(active.size) < miss_probability
+        out_valid[active[missed]] = False
+
+    # ---- step 4: inject false paths into free slots ----
+    # Free slots = originally invalid + newly missed
     free = np.flatnonzero(~out_valid)
-    for idx in free[:false_paths]:
+    n_free = len(free)
+    n_inject = min(false_paths, n_free)
+    if n_inject < false_paths:
+        warnings.warn(
+            f"perturb_tokens: only {n_inject}/{false_paths} false paths injected "
+            f"({n_free} free slots with {n_active_orig} active, "
+            f"{max_paths} max).  Consider increasing max_paths.",
+            RuntimeWarning,
+        )
+
+    for idx in free[:n_inject]:
         out[idx, 0] = rng.uniform(0.0, max_delay_bins)
         out[idx, 1] = rng.uniform(-max_abs_doppler_bins, max_abs_doppler_bins)
         out[idx, 2] = rng.uniform(0.01, 0.1)
         out[idx, 3] = rng.uniform(0.05, 0.4)
-        out[idx, 4:6] = 1.0
+        out[idx, 4] = 1.0
+        out[idx, 5] = 1.0
         out[idx, 6] = rng.uniform(0.0, 0.3)
         out_valid[idx] = True
+
     return out, out_valid
