@@ -69,17 +69,23 @@ def _ridge_ls(
 
     λ = ridge_relative * tr(A^H A) / L   where L = number of columns.
 
-    This keeps regularisation strength consistent across different numbers
-    of pilots and paths.
+    Uses augmented least-squares (A_aug = [A; √λ·I]) via np.linalg.lstsq
+    instead of np.linalg.solve on the normal equations.  This avoids MKL
+    crashes on near-singular Gram matrices (observed on Windows + Anaconda).
     """
     n_cols = A.shape[1]
     if n_cols == 0:
         return np.zeros(0, dtype=np.complex128)
     gram = A.conj().T @ A
-    trace_gram = np.trace(gram).real
+    trace_gram = float(np.trace(gram).real)
     ridge = ridge_relative * trace_gram / max(n_cols, 1)
-    rhs = A.conj().T @ y
-    return np.linalg.solve(gram + ridge * np.eye(n_cols), rhs)
+    sqrt_ridge = np.sqrt(max(ridge, np.finfo(float).eps))
+
+    # Augmented system: [A; √λ·I] x ≈ [y; 0]
+    A_aug = np.vstack([A, sqrt_ridge * np.eye(n_cols)])
+    y_aug = np.concatenate([y, np.zeros(n_cols, dtype=A.dtype)])
+    result, residuals, rank, singulars = np.linalg.lstsq(A_aug, y_aug, rcond=None)
+    return result
 
 
 # ---------------------------------------------------------------------------
