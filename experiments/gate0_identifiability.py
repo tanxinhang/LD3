@@ -645,6 +645,17 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         print(f"  *** Run 'pytest tests/test_oracle_closure.py -v' to diagnose")
     else:
         print(f"  nmse_oracle_perfect max = {perf_max:.1e}  (physical closure OK)")
+    # --- ORACLE vs ESTIMATED support diagnostic ---
+    if trial_rows:
+        oracle_vals = [float(r["nmse_oracle_support_ls"]) for r in trial_rows[:10]]
+        estim_vals = [float(r["nmse_estimated_support_ls"]) for r in trial_rows[:10]]
+        n_est_vals = [float(r["num_estimated"]) for r in trial_rows[:10]]
+        same = all(abs(o - e) < 1e-12 for o, e in zip(oracle_vals, estim_vals))
+        print(f"  oracle_support_ls vs estimated_support_ls (first 10 trials):")
+        print(f"    oracle:   {[f'{v:.4f}' for v in oracle_vals]}")
+        print(f"    estim:    {[f'{v:.4f}' for v in estim_vals]}")
+        print(f"    n_est:    {[f'{v:.0f}' for v in n_est_vals]}")
+        print(f"    identical: {same} — {'BUG: they should differ when recall<1' if same else 'OK'}")
 
 
 # ---------------------------------------------------------------------------
