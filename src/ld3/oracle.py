@@ -67,43 +67,72 @@ def _ridge_ls(
 ) -> np.ndarray:
     """Solve min ||A x - y||² + λ||x||² with trace-scaled regularisation.
 
-    Uses the closed-form normal-equation solution on the real-valued
-    equivalent system, avoiding MKL LAPACK (which SIGABRTs on this
-    Anaconda/Windows combination).
-
-    The solution:  x = (A^H A + λI)^{-1} A^H y
-    is computed by splitting into a 2L×2L real symmetric positive-definite
-    system and inverting via np.linalg.inv (which takes a different, stable
-    MKL path for small matrices).
+    Uses a manual Cholesky solver on the real-valued equivalent of the
+    normal equations.  This avoids ALL MKL LAPACK entry points (solve,
+    lstsq, inv — all of which SIGABRT on this Anaconda/Windows combo).
     """
     n_cols = A.shape[1]
     if n_cols == 0:
         return np.zeros(0, dtype=np.complex128)
 
-    # Ridge parameter
+    # Normal equations: (A^H A + λI) x = A^H y
     gram = A.conj().T @ A
     trace_gram = float(np.trace(gram).real)
     ridge = ridge_relative * trace_gram / max(n_cols, 1)
-    rhs = A.conj().T @ y  # complex, shape (L,)
+    G = gram + ridge * np.eye(n_cols)          # L×L complex Hermitian SPD
+    rhs = A.conj().T @ y                        # complex, shape (L,)
 
-    # Build the regularised Gram matrix G = A^H A + λI  (complex, L×L)
-    G = gram + ridge * np.eye(n_cols)
-
-    # Real-valued equivalent: [Re(G)  -Im(G)] [Re(x)]   [Re(rhs)]
-    #                        [Im(G)   Re(G)] [Im(x)] = [Im(rhs)]
+    # Real equivalent: 2L × 2L real SPD system
     G_real = np.block([
         [G.real, -G.imag],
         [G.imag,  G.real],
     ])
     rhs_real = np.concatenate([rhs.real, rhs.imag])
 
-    # Solve real SPD system.  For L ≤ 8 the matrix is tiny; np.linalg.inv
-    # uses a different MKL entry-point (GETRF+GETRI) that does not trigger
-    # the Windows SIGABRT observed with solve/lstsq.
-    x_real = np.linalg.inv(G_real) @ rhs_real
-
+    x_real = _solve_spd_cholesky(G_real, rhs_real)
     n = n_cols
     return x_real[:n] + 1j * x_real[n:]
+
+
+def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Solve Ax = b for a real SPD matrix A using manual Cholesky.
+
+    Uses ONLY element-wise numpy operations — no LAPACK calls.
+    Safe on MKL-crashing Anaconda/Windows environments.
+    """
+    n = A.shape[0]
+    L = np.zeros((n, n), dtype=np.float64)
+
+    # Cholesky: A = L @ L^T  (in-place construction)
+    for i in range(n):
+        for j in range(i + 1):
+            s = float(A[i, j])
+            for k in range(j):
+                s -= L[i, k] * L[j, k]
+            if i == j:
+                if s <= 0.0:
+                    s = np.finfo(np.float64).eps
+                L[i, j] = np.sqrt(s)
+            else:
+                L[i, j] = s / L[j, j]
+
+    # Forward substitution: L @ y = b
+    y = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        s = float(b[i])
+        for j in range(i):
+            s -= L[i, j] * y[j]
+        y[i] = s / L[i, i]
+
+    # Back substitution: L^T @ x = y
+    x = np.zeros(n, dtype=np.float64)
+    for i in range(n - 1, -1, -1):
+        s = y[i]
+        for j in range(i + 1, n):
+            s -= L[j, i] * x[j]
+        x[i] = s / L[i, i]
+
+    return x
 
 
 # ---------------------------------------------------------------------------
