@@ -594,6 +594,17 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         print(f"  bootstrap columns: {list(bootstrap_rows[0].keys())}")
     paired_ok = manifest.get("paired_design", {}).get("shared_channel_bank", False)
     print(f"  paired_design.shared_channel_bank = {paired_ok}")
+    # --- PHYSICAL CLOSURE CHECK ---
+    # Oracle perfect NMSE must be < 1e-10.  If not, every downstream NMSE
+    # decomposition is invalid.
+    perfect_vals = [float(r["nmse_oracle_perfect"]) for r in trial_rows]
+    perf_max = max(perfect_vals)
+    if perf_max > 1e-10:
+        print(f"  *** WARNING: nmse_oracle_perfect max = {perf_max:.3e} (> 1e-10)")
+        print(f"  *** Physical closure FAILED — check synthesis / reconstruction formulas")
+        print(f"  *** Run 'pytest tests/test_oracle_closure.py -v' to diagnose")
+    else:
+        print(f"  nmse_oracle_perfect max = {perf_max:.1e}  (physical closure OK)")
 
 
 # ---------------------------------------------------------------------------

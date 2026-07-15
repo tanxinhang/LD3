@@ -328,6 +328,10 @@ def identifiability_metrics(
     )
 
     # --- false alarm metrics ---
+    # Under Known-K with Top-K output and NO early-exit: n_est == n_true,
+    # so FP == FN == K - TP.  When NMS early-exits (peak below threshold),
+    # n_est < n_true and FP < FN — the missing peak was never reported.
+    # In Unknown-K (Gate 0-B), these two quantities decouple fully.
     n_false_alarms = n_est - len(matches)
     false_alarm_rate_per_est = n_false_alarms / max(n_est, 1)
 
@@ -672,19 +676,32 @@ def paired_bootstrap_test(
 
     ci_lower = float(np.percentile(bootstrap_diffs, 100 * alpha / 2))
     ci_upper = float(np.percentile(bootstrap_diffs, 100 * (1 - alpha / 2)))
-    # Two-sided p-value
+
+    # Two-sided p-value with finite-sample correction (k+1)/(B+1).
+    # Bootstrap CANNOT prove p=0; always report a floor of 1/(B+1).
     if mean_diff >= 0:
-        p_value = 2.0 * float(np.mean(bootstrap_diffs <= 0))
+        k = int(np.sum(bootstrap_diffs <= 0))
     else:
-        p_value = 2.0 * float(np.mean(bootstrap_diffs >= 0))
-    p_value = min(p_value, 1.0)
+        k = int(np.sum(bootstrap_diffs >= 0))
+    p_raw = 2.0 * (k + 1) / (n_bootstrap + 1)
+    p_value = min(p_raw, 1.0)
+
+    # Human-readable p-value string for CSV (avoids misleading "0.000")
+    if k == 0:
+        p_str = f"<{2.0 / (n_bootstrap + 1):.1e}"
+    elif p_value < 0.001:
+        p_str = f"{p_value:.1e}"
+    else:
+        p_str = f"{p_value:.4f}"
 
     return {
         "mean_diff": mean_diff,
         "ci_lower": ci_lower,
         "ci_upper": ci_upper,
         "p_value": p_value,
+        "p_value_str": p_str,
         "n_pairs": int(a.size),
+        "n_bootstrap": n_bootstrap,
     }
 
 
