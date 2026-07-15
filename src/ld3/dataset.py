@@ -9,7 +9,7 @@ from .channel import generate_path_set, synthesize_tf_channel
 from .config import ChannelConfig, OFDMConfig
 from .interpolation import nearest_smooth_interpolation
 from .oracle import oracle_path_tokens
-from .pilots import make_pilot_mask, observe_pilots
+from .pilots import generate_noise_grid, make_pilot_mask, observe_pilots
 
 
 @dataclass(frozen=True)
@@ -56,7 +56,15 @@ class SyntheticOFDMISACDataset(Dataset):
             rng,
             self.cfg.pilot_pattern,
         )
-        observed, _ = observe_pilots(truth, mask, snr_db, rng)
+        # Full-grid SNR definition (consistent with Gate 0 paired design)
+        signal_power = float(np.mean(np.abs(truth) ** 2))
+        noise_grid, noise_var = generate_noise_grid(
+            truth.shape, signal_power, snr_db, rng,
+        )
+        observed, _ = observe_pilots(
+            truth, mask, snr_db, rng,
+            noise_grid=noise_grid, noise_var=noise_var,
+        )
         initial = nearest_smooth_interpolation(observed, mask)
         tokens, valid = oracle_path_tokens(paths, self.cfg.max_paths)
 

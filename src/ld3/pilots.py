@@ -31,6 +31,19 @@ def make_pilot_mask(
         stride = max(1, int(round(1.0 / np.sqrt(density))))
         mask = np.zeros(shape, dtype=bool)
         mask[::stride, ::stride] = True
+        # Trim to exact target count for fair comparison with Random
+        target_count = max(1, int(round(density * num_subcarriers * num_symbols)))
+        actual_count = int(mask.sum())
+        if actual_count > target_count:
+            # Randomly drop excess pilots from the Comb grid
+            idx = np.flatnonzero(mask)
+            drop = rng.choice(idx, size=actual_count - target_count, replace=False)
+            mask.flat[drop] = False
+        elif actual_count < target_count:
+            # Randomly add pilots on the Comb grid's off-grid positions
+            off_grid = np.flatnonzero(~mask)
+            add = rng.choice(off_grid, size=target_count - actual_count, replace=False)
+            mask.flat[add] = True
         return mask
 
     raise ValueError(f"unknown pilot pattern: {pattern}")

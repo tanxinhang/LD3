@@ -50,7 +50,7 @@ from ld3.oracle import (
     oracle_perfect_reconstruction,
     oracle_support_ls_reconstruction,
 )
-from ld3.pilots import make_pilot_mask, observe_pilots
+from ld3.pilots import generate_noise_grid, make_pilot_mask, observe_pilots
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -110,7 +110,15 @@ def evaluate_non_learned_baselines(
             ofdm.num_subcarriers, ofdm.num_symbols,
             cfg.pilot_density, rng_sample, cfg.pilot_pattern,
         )
-        observed, _ = observe_pilots(truth, mask, snr_db, rng_sample)
+        # Full-grid SNR (consistent with Gate 0 paired design)
+        signal_power = float(np.mean(np.abs(truth) ** 2))
+        noise_grid, noise_var = generate_noise_grid(
+            truth.shape, signal_power, snr_db, rng_sample,
+        )
+        observed, _ = observe_pilots(
+            truth, mask, snr_db, rng_sample,
+            noise_grid=noise_grid, noise_var=noise_var,
+        )
 
         # Nearest-neighbour interpolation
         from ld3.interpolation import nearest_smooth_interpolation
@@ -266,7 +274,12 @@ def hierarchical_bootstrap_seeds(
     per_seed_nmse: list[np.ndarray],
     n_bootstrap: int = 5000,
 ) -> dict[str, float]:
-    """Compute CI on mean NMSE across seeds, resampling both seeds and samples."""
+    """Compute CI on mean NMSE across seeds, resampling both seeds and samples.
+
+    Uses SHARED sample indices across all seeds in each bootstrap iteration,
+    preserving the paired structure (each test sample sees the same channel
+    and noise across different training seeds).
+    """
     if len(per_seed_nmse) < 2:
         arr = per_seed_nmse[0]
         return {
@@ -276,22 +289,56 @@ def hierarchical_bootstrap_seeds(
             "n_seeds": len(per_seed_nmse),
         }
     rng = np.random.default_rng(42)
+    n_samples = per_seed_nmse[0].shape[0]
     means = np.zeros(n_bootstrap)
     for i in range(n_bootstrap):
         # Resample seeds
         seed_idx = rng.choice(len(per_seed_nmse), size=len(per_seed_nmse), replace=True)
-        # Within each selected seed, resample samples
+        # SHARED sample indices across all seeds
+        sample_idx = rng.choice(n_samples, size=n_samples, replace=True)
         seed_means = []
         for si in seed_idx:
-            samples = per_seed_nmse[si]
-            sample_idx = rng.choice(len(samples), size=len(samples), replace=True)
-            seed_means.append(float(np.mean(samples[sample_idx])))
+            seed_means.append(float(np.mean(per_seed_nmse[si][sample_idx])))
         means[i] = float(np.mean(seed_means))
     return {
         "mean": float(np.mean([float(np.mean(s)) for s in per_seed_nmse])),
         "ci_lower": float(np.percentile(means, 2.5)),
         "ci_upper": float(np.percentile(means, 97.5)),
         "n_seeds": len(per_seed_nmse),
+    }
+
+
+def paired_bootstrap_gain(
+    per_seed_nmse_a: list[np.ndarray],
+    per_seed_nmse_b: list[np.ndarray],
+    n_bootstrap: int = 5000,
+) -> dict[str, float]:
+    """Compute CI on the PAIRED difference A - B across seeds.
+
+    Each bootstrap iteration: resample seeds → shared sample indices →
+    compute mean(A-B) on the resampled data.  This properly accounts for
+    both seed-level and sample-level variance in the paired comparison.
+    """
+    if len(per_seed_nmse_a) != len(per_seed_nmse_b) or len(per_seed_nmse_a) < 2:
+        return {"mean_diff": float("nan"), "ci_lower": float("nan"), "ci_upper": float("nan")}
+    rng = np.random.default_rng(42)
+    n_seeds = len(per_seed_nmse_a)
+    n_samples = per_seed_nmse_a[0].shape[0]
+    diffs = np.zeros(n_bootstrap)
+    for i in range(n_bootstrap):
+        seed_idx = rng.choice(n_seeds, size=n_seeds, replace=True)
+        sample_idx = rng.choice(n_samples, size=n_samples, replace=True)
+        seed_diffs = []
+        for si in seed_idx:
+            seed_diffs.append(float(np.mean(
+                per_seed_nmse_a[si][sample_idx] - per_seed_nmse_b[si][sample_idx]
+            )))
+        diffs[i] = float(np.mean(seed_diffs))
+    return {
+        "mean_diff": float(np.mean(diffs)),
+        "ci_lower": float(np.percentile(diffs, 2.5)),
+        "ci_upper": float(np.percentile(diffs, 97.5)),
+        "n_seeds": n_seeds,
     }
 
 
@@ -490,11 +537,15 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         )
         all_results["seeds"][f"seed_{run_seed}"] = seed_results
 
-    # --- Hierarchical bootstrap across seeds ---
-    if num_seeds > 1 and per_seed_tf_nmse:
+    # --- Hierarchical bootstrap across seeds (paired resampling) ---
+    if num_seeds > 1 and per_seed_tf_nmse and per_seed_cross_nmse:
         all_results["hierarchical_bootstrap"] = {
             "tf_only_nmse_linear": hierarchical_bootstrap_seeds(per_seed_tf_nmse),
             "cross_attention_nmse_linear": hierarchical_bootstrap_seeds(per_seed_cross_nmse),
+            # PAIRED comparison: Cross-attention minus TF-only
+            "cross_vs_tf_only_paired_gain_linear": paired_bootstrap_gain(
+                per_seed_tf_nmse, per_seed_cross_nmse,
+            ),
         }
         if per_seed_cross_shuffled_nmse:
             all_results["hierarchical_bootstrap"]["cross_attention_shuffled_nmse_linear"] = (
