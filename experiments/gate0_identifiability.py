@@ -101,8 +101,12 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         int(estimator["oversample_doppler"]),
     )
 
-    nms_dr = int(estimator["nms_delay_radius"])
-    nms_fr = int(estimator["nms_doppler_radius"])
+    # NMS radius: config specifies physical bins; scale to grid cells by OS factor.
+    # This keeps the physical suppression region CONSTANT regardless of oversampling.
+    os_delay = int(estimator["oversample_delay"])
+    os_doppler = int(estimator["oversample_doppler"])
+    nms_dr = int(estimator["nms_delay_radius"] * os_delay)
+    nms_fr = int(estimator["nms_doppler_radius"] * os_doppler)
     delay_tol = float(estimator["delay_tolerance_bins"])
     doppler_tol = float(estimator["doppler_tolerance_bins"])
 

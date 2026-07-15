@@ -234,12 +234,21 @@ def train_model(
     learning_rate: float,
     weight_decay: float,
     is_cross: bool,
-) -> list[dict[str, float]]:
+    val_loader: DataLoader | None = None,
+) -> tuple[list[dict[str, float]], torch.nn.Module]:
+    """Train with optional validation-based best-checkpoint selection.
+
+    Returns (history, best_model_state_dict).  If val_loader is None, the
+    final model state is returned as "best".
+    """
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
     history: list[dict[str, float]] = []
+    best_val_nmse = float("inf")
+    best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
     for epoch in range(1, epochs + 1):
         model.train()
         losses: list[float] = []
@@ -247,9 +256,28 @@ def train_model(
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             if is_cross:
-                output, _ = model(
-                    batch["tf_input"], batch["path_tokens"], batch["path_valid"]
-                )
+                # --- Token augmentation (train-time only) ---
+                pt = batch["path_tokens"]
+                pv = batch["path_valid"]
+                # Token dropout: randomly invalidate 10% of valid tokens
+                if torch.rand(1).item() < 0.1:
+                    valid_mask = pv.clone()
+                    valid_idx = torch.nonzero(valid_mask, as_tuple=False)
+                    if valid_idx.shape[0] > 0:
+                        drop_idx = valid_idx[
+                            torch.randperm(valid_idx.shape[0])[
+                                :max(1, int(0.3 * valid_idx.shape[0]))
+                            ]
+                        ]
+                        pv = pv.clone()
+                        pv[drop_idx[:, 0], drop_idx[:, 1]] = False
+                # Token shuffle: randomise token-sample assignment in 10% of batches
+                if torch.rand(1).item() < 0.1:
+                    perm = torch.randperm(pt.shape[0], device=device)
+                    pt = pt[perm]
+                    pv = pv[perm]
+
+                output, _ = model(batch["tf_input"], pt, pv)
             else:
                 output = model(batch["tf_input"])
             loss = nmse_loss(output, batch["target"])
@@ -259,10 +287,39 @@ def train_model(
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
             losses.append(float(loss.detach().cpu()))
+
         row = {"epoch": float(epoch), "train_nmse": float(np.mean(losses))}
+
+        # Validation
+        if val_loader is not None:
+            model.eval()
+            val_losses: list[float] = []
+            with torch.no_grad():
+                for batch in val_loader:
+                    batch = move_batch(batch, device)
+                    if is_cross:
+                        output, _ = model(
+                            batch["tf_input"], batch["path_tokens"], batch["path_valid"]
+                        )
+                    else:
+                        output = model(batch["tf_input"])
+                    val_losses.append(float(nmse_loss(output, batch["target"]).cpu()))
+            val_nmse = float(np.mean(val_losses))
+            row["val_nmse"] = val_nmse
+            if val_nmse < best_val_nmse:
+                best_val_nmse = val_nmse
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                row["best"] = True
+
         history.append(row)
-        print(f"  epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}")
-    return history
+        parts = [f"epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}"]
+        if val_loader is not None:
+            parts.append(f"val_nmse={row.get('val_nmse', float('nan')):.6f}")
+            if row.get("best"):
+                parts.append("(best)")
+        print(f"  {' '.join(parts)}")
+
+    return history, best_state
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +426,17 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         max_paths=int(data_cfg["max_paths"]),
         seed=base_seed + 10000,  # FIXED — never changes
     )
+    # Fixed validation bank for best-checkpoint selection
+    val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))
+    val_cfg_fixed = DatasetConfig(
+        size=val_size,
+        snr_min_db=float(data_cfg["snr_min_db"]),
+        snr_max_db=float(data_cfg["snr_max_db"]),
+        pilot_density=float(data_cfg["pilot_density"]),
+        pilot_pattern=str(data_cfg["pilot_pattern"]),
+        max_paths=int(data_cfg["max_paths"]),
+        seed=base_seed + 20000,  # FIXED — never changes
+    )
 
     # --- Non-learned baselines (run ONCE on fixed test bank) ---
     print("Evaluating non-learned baselines (Gate 1-A, 1-B, 1-C)...")
@@ -411,21 +479,21 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             seed=run_seed,
         )
         train_set = SyntheticOFDMISACDataset(ofdm, channel, train_cfg)
+        val_set = SyntheticOFDMISACDataset(ofdm, channel, val_cfg_fixed)
         test_set = SyntheticOFDMISACDataset(ofdm, channel, test_cfg_fixed)
 
         generator = torch.Generator().manual_seed(run_seed)
         train_loader = DataLoader(
-            train_set,
-            batch_size=int(training["batch_size"]),
-            shuffle=True,
-            num_workers=0,
-            generator=generator,
+            train_set, batch_size=int(training["batch_size"]),
+            shuffle=True, num_workers=0, generator=generator,
+        )
+        val_loader = DataLoader(
+            val_set, batch_size=int(training["batch_size"]),
+            shuffle=False, num_workers=0,
         )
         test_loader = DataLoader(
-            test_set,
-            batch_size=int(training["batch_size"]),
-            shuffle=False,
-            num_workers=0,
+            test_set, batch_size=int(training["batch_size"]),
+            shuffle=False, num_workers=0,
         )
 
         models: dict[str, tuple[torch.nn.Module, bool]] = {
@@ -444,7 +512,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         seed_results: dict[str, Any] = {}
         for name, (model, is_cross) in models.items():
             print(f"\nTraining {name} on {device}")
-            history = train_model(
+            history, best_state = train_model(
                 model,
                 train_loader,
                 device,
@@ -452,7 +520,16 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 learning_rate=float(training["learning_rate"]),
                 weight_decay=float(training["weight_decay"]),
                 is_cross=is_cross,
+                val_loader=val_loader,
             )
+            # Load best-validation checkpoint before final evaluation
+            model.load_state_dict(best_state)
+            best_epoch = next(
+                (r["epoch"] for r in reversed(history) if r.get("best")),
+                float(history[-1]["epoch"]),
+            )
+            print(f"  Loaded best checkpoint (epoch={int(best_epoch)})")
+
             metrics = evaluate(model, test_loader, device, is_cross, token_mode="oracle")
             evaluations = {"oracle": metrics}
 
