@@ -172,6 +172,118 @@ def detect_paths_nms(
     )
 
 
+def refine_paths_quadratic(
+    est: EstimatedPaths,
+    score_map: np.ndarray,
+    grid: DDGrid,
+) -> EstimatedPaths:
+    """Refine DD path estimates via local 2D quadratic interpolation.
+
+    For each detected peak, fits a 2D quadratic to the local 3×3 patch of
+    the score map and solves for the sub-grid maximum.  This corrects the
+    off-grid leakage floor at very low cost (no gradient iterations).
+
+    Uses the ORIGINAL score_map (before NMS suppression) so neighbouring
+    peaks don't corrupt the local fit.
+    """
+    refined_delays: list[float] = []
+    refined_dopplers: list[float] = []
+    refined_scores: list[float] = []
+    refined_gains: list[complex] = []
+
+    n_delay = grid.delay_bins.size
+    n_doppler = grid.doppler_bins.size
+    d_step = grid.delay_bins[1] - grid.delay_bins[0] if n_delay > 1 else 1.0
+    f_step = grid.doppler_bins[1] - grid.doppler_bins[0] if n_doppler > 1 else 1.0
+
+    for l in range(len(est.delay_bins)):
+        d0 = float(est.delay_bins[l])
+        f0 = float(est.doppler_bins[l])
+
+        # Nearest grid index
+        i0 = int(np.argmin(np.abs(grid.delay_bins - d0)))
+        j0 = int(np.argmin(np.abs(grid.doppler_bins - f0)))
+
+        # Extract 3×3 patch (clamp to grid bounds)
+        i_start = max(0, i0 - 1)
+        i_end = min(n_delay, i0 + 2)
+        j_start = max(0, j0 - 1)
+        j_end = min(n_doppler, j0 + 2)
+
+        patch = score_map[i_start:i_end, j_start:j_end]
+        if patch.size < 3:  # too close to edge — skip refinement
+            refined_delays.append(d0)
+            refined_dopplers.append(f0)
+            refined_scores.append(float(est.scores[l]))
+            refined_gains.append(complex(est.gains[l]))
+            continue
+
+        # Fit quadratic: f(x, y) ≈ c0 + c1*x + c2*y + c3*x² + c4*y² + c5*x*y
+        # where x = (delay - d0) / d_step,  y = (doppler - f0) / f_step
+        ny, nx = patch.shape
+        xx = np.arange(j_start - j0, j_start - j0 + nx, dtype=np.float64)  # Doppler
+        yy = np.arange(i_start - i0, i_start - i0 + ny, dtype=np.float64)  # Delay
+        X, Y = np.meshgrid(xx, yy)
+        z = np.abs(patch).astype(np.float64)
+
+        # Build design matrix and solve least-squares
+        A = np.column_stack([
+            np.ones(X.size),
+            Y.ravel(), X.ravel(),
+            (Y.ravel()) ** 2, (X.ravel()) ** 2,
+            Y.ravel() * X.ravel(),
+        ])
+        try:
+            coeffs, _, _, _ = np.linalg.lstsq(A, z.ravel(), rcond=None)
+        except np.linalg.LinAlgError:
+            refined_delays.append(d0)
+            refined_dopplers.append(f0)
+            refined_scores.append(float(est.scores[l]))
+            refined_gains.append(complex(est.gains[l]))
+            continue
+
+        c0, c1, c2, c3, c4, c5 = coeffs
+
+        # Solve ∇f = 0:
+        #   c1 + 2*c3*x + c5*y = 0
+        #   c2 + 2*c4*y + c5*x = 0
+        det = 4.0 * c3 * c4 - c5 * c5
+        if abs(det) > 1e-12 and c3 < -1e-12 and c4 < -1e-12:
+            dx = (c5 * c2 - 2.0 * c4 * c1) / det
+            dy = (c5 * c1 - 2.0 * c3 * c2) / det
+            # Clamp to ±1 grid cell (don't extrapolate too far)
+            dx = max(-1.0, min(1.0, dx))
+            dy = max(-1.0, min(1.0, dy))
+            d_refined = d0 + dy * d_step
+            f_refined = f0 + dx * f_step
+            # Interpolated score at peak
+            score_refined = float(
+                c0 + c1 * dy + c2 * dx + c3 * dy**2 + c4 * dx**2 + c5 * dy * dx
+            )
+        else:
+            d_refined = d0
+            f_refined = f0
+            score_refined = float(est.scores[l])
+
+        refined_delays.append(d_refined)
+        refined_dopplers.append(f_refined)
+        refined_scores.append(score_refined / max(float(np.max(np.abs(score_map))), np.finfo(float).eps))
+        refined_gains.append(complex(est.gains[l]))
+
+    return EstimatedPaths(
+        delay_bins=np.clip(
+            np.asarray(refined_delays, dtype=np.float64),
+            0.0, grid.delay_bins[-1],
+        ),
+        doppler_bins=np.clip(
+            np.asarray(refined_dopplers, dtype=np.float64),
+            grid.doppler_bins[0], grid.doppler_bins[-1],
+        ),
+        scores=np.asarray(refined_scores, dtype=np.float64),
+        gains=np.asarray(refined_gains, dtype=np.complex128),
+    )
+
+
 def detect_paths_oracle_nms(
     score_map: np.ndarray,
     gain_map: np.ndarray,

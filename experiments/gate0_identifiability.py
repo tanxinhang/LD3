@@ -48,6 +48,7 @@ from ld3.dd_estimation import (
     masked_matched_filter_map,
     paired_bootstrap_test,
     pilot_ambiguity_function,
+    refine_paths_quadratic,
 )
 from ld3.metrics import nmse_numpy
 from ld3.oracle import (
@@ -172,6 +173,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     use_integer_bins = bool(ablation.get("integer_bins", False))
     use_oracle_nms = bool(ablation.get("oracle_nms", False))
+    use_refine = bool(ablation.get("refine", False))
 
     trial_rows: list[dict[str, Any]] = []
 
@@ -242,6 +244,10 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                             doppler_radius=nms_fr,
                             relative_threshold=float(estimator["relative_threshold"]),
                         )
+
+                    # --- ablation: sub-grid quadratic refinement ---
+                    if use_refine:
+                        estimated = refine_paths_quadratic(estimated, score_map, grid)
 
                     metrics = identifiability_metrics(
                         paths.delay_bins,
@@ -397,6 +403,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         ablation_tag = "_integer_bins"
     if use_oracle_nms:
         ablation_tag += "_oracle_nms"
+    if use_refine:
+        ablation_tag += "_refine"
 
     manifest = {
         "config": config,
@@ -633,7 +641,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--ablation-oracle-nms", action="store_true",
-        help="Use oracle NMS that selects the grid point closest to each true path",
+        help="Oracle DISCRETE peak selection: select nearest grid point to each true path "
+             "(NOT oracle continuous — uses discrete dictionary, not true {τ,ν})",
+    )
+    parser.add_argument(
+        "--ablation-refine", action="store_true",
+        help="Refine DD peak positions via local 2D quadratic interpolation "
+             "(sub-grid correction for off-grid leakage)",
     )
     args = parser.parse_args()
     config = load_config(args.config)
@@ -645,6 +659,8 @@ def main() -> None:
         config["ablation"]["integer_bins"] = True
     if args.ablation_oracle_nms:
         config["ablation"]["oracle_nms"] = True
+    if args.ablation_refine:
+        config["ablation"]["refine"] = True
     run(config, args.output_dir)
 
 

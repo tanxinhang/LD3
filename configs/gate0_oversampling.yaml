@@ -1,0 +1,38 @@
+# Gate 0 oversampling sweep: diagnose grid-resolution benefit.
+#
+# Scans delay_oversample × doppler_oversample at a fixed work point.
+#
+# Usage:
+#   python experiments/gate0_identifiability.py --config configs/gate0_oversampling.yaml --output-dir results/gate0_os_2x4
+#   (edit estimator.oversample_delay / oversample_doppler and re-run for each point)
+
+seed: 2036
+trials: 200
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+sweep:
+  snr_db: [0, 10, 20, 30]
+  pilot_density: [0.125]
+  pilot_pattern: [random]
+estimator:
+  oversample_delay: 2
+  oversample_doppler: 4
+  delay_tolerance_bins: 0.75
+  doppler_tolerance_bins: 0.5
+  nms_delay_radius: 2
+  nms_doppler_radius: 2
+  relative_threshold: 0.08
+
+# To sweep: edit oversample_delay / oversample_doppler and re-run:
+#   (1,1), (2,4), (4,8), (8,16)
