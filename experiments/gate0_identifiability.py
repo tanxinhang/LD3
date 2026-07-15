@@ -580,6 +580,20 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     print(f"  Coherence report  → {output_dir / 'gate0_coherence.csv'}")
     print(f"  Ambiguity report   → {output_dir / 'gate0_ambiguity.csv'}")
     print(f"  Paired bootstrap   → {bootstrap_path}")
+    # Diagnostic: confirm key outputs
+    print(f"  ---")
+    print(f"  trial_rows:        {len(trial_rows)} rows")
+    print(f"  summary_rows:      {len(summary_rows)} groups")
+    if summary_rows:
+        has_se = any("_se" in k for k in summary_rows[0])
+        has_ci = any("_ci95_lower" in k for k in summary_rows[0])
+        has_neff = any("_n_eff" in k for k in summary_rows[0])
+        print(f"  summary columns:   {len(summary_rows[0])} cols, _se={has_se}, _ci95={has_ci}, _n_eff={has_neff}")
+    print(f"  bootstrap_rows:    {len(bootstrap_rows)} rows")
+    if bootstrap_rows:
+        print(f"  bootstrap columns: {list(bootstrap_rows[0].keys())}")
+    paired_ok = manifest.get("paired_design", {}).get("shared_channel_bank", False)
+    print(f"  paired_design.shared_channel_bank = {paired_ok}")
 
 
 # ---------------------------------------------------------------------------
