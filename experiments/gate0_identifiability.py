@@ -246,8 +246,34 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                         )
 
                     # --- ablation: sub-grid quadratic refinement ---
-                    if use_refine:
-                        estimated = refine_paths_quadratic(estimated, score_map, grid)
+                    if use_refine and len(estimated.delay_bins) > 0:
+                        # Compute pilot residual BEFORE refinement
+                        H_est_ls_old = estimated_support_ls_reconstruction(
+                            ofdm, est=estimated,
+                            pilot_observations=observed, pilot_mask=mask,
+                        )
+                        resid_old = float(np.sum(np.abs(
+                            observed[mask] - H_est_ls_old[mask]
+                        ) ** 2))
+
+                        # Refine positions
+                        estimated_refined = refine_paths_quadratic(
+                            estimated, score_map, grid
+                        )
+
+                        # Compute pilot residual AFTER refinement
+                        H_est_ls_new = estimated_support_ls_reconstruction(
+                            ofdm, est=estimated_refined,
+                            pilot_observations=observed, pilot_mask=mask,
+                        )
+                        resid_new = float(np.sum(np.abs(
+                            observed[mask] - H_est_ls_new[mask]
+                        ) ** 2))
+
+                        # Accept refinement ONLY if pilot residual decreases
+                        if resid_new < resid_old:
+                            estimated = estimated_refined
+                        # else: keep original grid positions
 
                     metrics = identifiability_metrics(
                         paths.delay_bins,

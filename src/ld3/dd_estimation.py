@@ -179,12 +179,14 @@ def refine_paths_quadratic(
 ) -> EstimatedPaths:
     """Refine DD path estimates via local 2D quadratic interpolation.
 
-    For each detected peak, fits a 2D quadratic to the local 3×3 patch of
-    the score map and solves for the sub-grid maximum.  This corrects the
-    off-grid leakage floor at very low cost (no gradient iterations).
+    Fits a 2D quadratic to the local 3×3 patch of the log-power score map
+    and solves for the sub-grid maximum.  Clamps offsets to ±0.5 fine-grid
+    cells to stay within the interpolation neighbourhood.
 
-    Uses the ORIGINAL score_map (before NMS suppression) so neighbouring
-    peaks don't corrupt the local fit.
+    NOTE: this only adjusts positions; gains MUST be re-estimated (e.g. via
+    estimated_support_ls_reconstruction) after refinement.  The caller should
+    also verify that pilot residual decreases — peak interpolation ≠ optimal
+    reconstruction.
     """
     refined_delays: list[float] = []
     refined_dopplers: list[float] = []
@@ -196,37 +198,55 @@ def refine_paths_quadratic(
     d_step = grid.delay_bins[1] - grid.delay_bins[0] if n_delay > 1 else 1.0
     f_step = grid.doppler_bins[1] - grid.doppler_bins[0] if n_doppler > 1 else 1.0
 
+    # Work in log-power for stability (avoid strong sidelobe dominance)
+    score_log = np.log10(np.maximum(np.abs(score_map), np.finfo(np.float64).eps))
+
     for l in range(len(est.delay_bins)):
         d0 = float(est.delay_bins[l])
         f0 = float(est.doppler_bins[l])
 
-        # Nearest grid index
+        # Nearest grid index (delay)
         i0 = int(np.argmin(np.abs(grid.delay_bins - d0)))
-        j0 = int(np.argmin(np.abs(grid.doppler_bins - f0)))
 
-        # Extract 3×3 patch (clamp to grid bounds)
+        # Nearest grid index (Doppler) — handle periodic wrap
+        doppler_half = int(n_doppler // 2)
+        doppler_diff = np.abs(grid.doppler_bins - f0)
+        # For periodic axis, consider wrap-around
+        doppler_diff_wrap = np.minimum(
+            doppler_diff,
+            np.abs(grid.doppler_bins - f0 + 2.0 * grid.doppler_bins[-1])
+            if grid.doppler_bins[0] < 0 else doppler_diff,
+        )
+        j0 = int(np.argmin(doppler_diff_wrap))
+
+        # Extract 3×3 patch (clamp to grid bounds; Doppler handles wrap below)
         i_start = max(0, i0 - 1)
         i_end = min(n_delay, i0 + 2)
-        j_start = max(0, j0 - 1)
-        j_end = min(n_doppler, j0 + 2)
+        j_indices = np.arange(j0 - 1, j0 + 2)
+        # Wrap Doppler indices periodically
+        j_wrapped = np.mod(j_indices, n_doppler)
 
-        patch = score_map[i_start:i_end, j_start:j_end]
-        if patch.size < 3:  # too close to edge — skip refinement
+        patch = score_log[i_start:i_end, :][:, np.arange(len(j_wrapped))]
+        for pi in range(i_end - i_start):
+            for pj in range(len(j_wrapped)):
+                patch[pi, pj] = score_log[i_start + pi, j_wrapped[pj]]
+
+        if patch.size < 3:
             refined_delays.append(d0)
             refined_dopplers.append(f0)
             refined_scores.append(float(est.scores[l]))
             refined_gains.append(complex(est.gains[l]))
             continue
 
-        # Fit quadratic: f(x, y) ≈ c0 + c1*x + c2*y + c3*x² + c4*y² + c5*x*y
-        # where x = (delay - d0) / d_step,  y = (doppler - f0) / f_step
+        # Fit quadratic: f(y, x) ≈ c0 + c1*y + c2*x + c3*y² + c4*x² + c5*y*x
+        # where y = (delay_idx - i0) in fine-grid cells,
+        #       x = (doppler_idx - j0) in fine-grid cells.
         ny, nx = patch.shape
-        xx = np.arange(j_start - j0, j_start - j0 + nx, dtype=np.float64)  # Doppler
-        yy = np.arange(i_start - i0, i_start - i0 + ny, dtype=np.float64)  # Delay
+        yy = np.arange(i_start - i0, i_start - i0 + ny, dtype=np.float64)
+        xx = np.arange(-1, -1 + nx, dtype=np.float64)  # always [-1, 0, 1] for 3×3
         X, Y = np.meshgrid(xx, yy)
-        z = np.abs(patch).astype(np.float64)
+        z = patch.astype(np.float64).ravel()
 
-        # Build design matrix and solve least-squares
         A = np.column_stack([
             np.ones(X.size),
             Y.ravel(), X.ravel(),
@@ -234,7 +254,7 @@ def refine_paths_quadratic(
             Y.ravel() * X.ravel(),
         ])
         try:
-            coeffs, _, _, _ = np.linalg.lstsq(A, z.ravel(), rcond=None)
+            coeffs, _, _, _ = np.linalg.lstsq(A, z, rcond=None)
         except np.linalg.LinAlgError:
             refined_delays.append(d0)
             refined_dopplers.append(f0)
@@ -244,26 +264,28 @@ def refine_paths_quadratic(
 
         c0, c1, c2, c3, c4, c5 = coeffs
 
-        # Solve ∇f = 0:
-        #   c1 + 2*c3*x + c5*y = 0
-        #   c2 + 2*c4*y + c5*x = 0
+        # Must be concave-down in both directions (local maximum)
         det = 4.0 * c3 * c4 - c5 * c5
         if abs(det) > 1e-12 and c3 < -1e-12 and c4 < -1e-12:
             dx = (c5 * c2 - 2.0 * c4 * c1) / det
             dy = (c5 * c1 - 2.0 * c3 * c2) / det
-            # Clamp to ±1 grid cell (don't extrapolate too far)
-            dx = max(-1.0, min(1.0, dx))
-            dy = max(-1.0, min(1.0, dy))
+            # Clamp to ±0.5 fine-grid cells (stay within interpolation patch)
+            dx = max(-0.5, min(0.5, dx))
+            dy = max(-0.5, min(0.5, dy))
             d_refined = d0 + dy * d_step
             f_refined = f0 + dx * f_step
-            # Interpolated score at peak
             score_refined = float(
-                c0 + c1 * dy + c2 * dx + c3 * dy**2 + c4 * dx**2 + c5 * dy * dx
+                10.0 ** (c0 + c1 * dy + c2 * dx + c3 * dy**2 + c4 * dx**2 + c5 * dy * dx)
             )
         else:
             d_refined = d0
             f_refined = f0
             score_refined = float(est.scores[l])
+
+        # Clip delay to physical range; wrap Doppler
+        d_refined = max(0.0, min(d_refined, grid.delay_bins[-1]))
+        f_half = grid.doppler_bins[-1]
+        f_refined = max(-f_half, min(f_refined, f_half))
 
         refined_delays.append(d_refined)
         refined_dopplers.append(f_refined)
@@ -271,14 +293,8 @@ def refine_paths_quadratic(
         refined_gains.append(complex(est.gains[l]))
 
     return EstimatedPaths(
-        delay_bins=np.clip(
-            np.asarray(refined_delays, dtype=np.float64),
-            0.0, grid.delay_bins[-1],
-        ),
-        doppler_bins=np.clip(
-            np.asarray(refined_dopplers, dtype=np.float64),
-            grid.doppler_bins[0], grid.doppler_bins[-1],
-        ),
+        delay_bins=np.asarray(refined_delays, dtype=np.float64),
+        doppler_bins=np.asarray(refined_dopplers, dtype=np.float64),
         scores=np.asarray(refined_scores, dtype=np.float64),
         gains=np.asarray(refined_gains, dtype=np.complex128),
     )
