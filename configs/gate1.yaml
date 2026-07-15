@@ -1,0 +1,30 @@
+seed: 2036
+device: auto
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+dataset:
+  train_size: 1024
+  test_size: 256
+  snr_min_db: -5.0
+  snr_max_db: 20.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+training:
+  epochs: 20
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 32
+  num_threads: 4
