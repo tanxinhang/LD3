@@ -67,36 +67,43 @@ def _ridge_ls(
 ) -> np.ndarray:
     """Solve min ||A x - y||² + λ||x||² with trace-scaled regularisation.
 
-    λ = ridge_relative * tr(A^H A) / L   where L = number of columns.
+    Uses the closed-form normal-equation solution on the real-valued
+    equivalent system, avoiding MKL LAPACK (which SIGABRTs on this
+    Anaconda/Windows combination).
 
-    Uses real-valued decomposition of the augmented system to avoid MKL
-    crashes on complex128 matrices (observed on Windows + Anaconda).
+    The solution:  x = (A^H A + λI)^{-1} A^H y
+    is computed by splitting into a 2L×2L real symmetric positive-definite
+    system and inverting via np.linalg.inv (which takes a different, stable
+    MKL path for small matrices).
     """
     n_cols = A.shape[1]
     if n_cols == 0:
         return np.zeros(0, dtype=np.complex128)
+
+    # Ridge parameter
     gram = A.conj().T @ A
     trace_gram = float(np.trace(gram).real)
     ridge = ridge_relative * trace_gram / max(n_cols, 1)
-    sqrt_ridge = np.sqrt(max(ridge, np.finfo(float).eps))
+    rhs = A.conj().T @ y  # complex, shape (L,)
 
-    # Augmented system: [A; √λ·I] x ≈ [y; 0]
-    A_aug = np.vstack([A, sqrt_ridge * np.eye(n_cols)])
-    y_aug = np.concatenate([y, np.zeros(n_cols, dtype=A.dtype)])
+    # Build the regularised Gram matrix G = A^H A + λI  (complex, L×L)
+    G = gram + ridge * np.eye(n_cols)
 
-    # Split into real-valued system to avoid MKL complex-path SIGABRT.
-    # [Re(A)  -Im(A)] [Re(x)]   [Re(y)]
-    # [Im(A)   Re(A)] [Im(x)] = [Im(y)]
-    A_real = np.block([
-        [A_aug.real, -A_aug.imag],
-        [A_aug.imag,  A_aug.real],
+    # Real-valued equivalent: [Re(G)  -Im(G)] [Re(x)]   [Re(rhs)]
+    #                        [Im(G)   Re(G)] [Im(x)] = [Im(rhs)]
+    G_real = np.block([
+        [G.real, -G.imag],
+        [G.imag,  G.real],
     ])
-    y_real = np.concatenate([y_aug.real, y_aug.imag])
-    result_real, _residuals, _rank, _singulars = np.linalg.lstsq(
-        A_real, y_real, rcond=None
-    )
+    rhs_real = np.concatenate([rhs.real, rhs.imag])
+
+    # Solve real SPD system.  For L ≤ 8 the matrix is tiny; np.linalg.inv
+    # uses a different MKL entry-point (GETRF+GETRI) that does not trigger
+    # the Windows SIGABRT observed with solve/lstsq.
+    x_real = np.linalg.inv(G_real) @ rhs_real
+
     n = n_cols
-    return result_real[:n] + 1j * result_real[n:]
+    return x_real[:n] + 1j * x_real[n:]
 
 
 # ---------------------------------------------------------------------------
