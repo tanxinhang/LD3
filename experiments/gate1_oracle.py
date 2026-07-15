@@ -1,4 +1,19 @@
 #!/usr/bin/env python3
+"""Gate 1: Oracle DD value validation with layered baselines.
+
+Gate 1-A: Physical model closure (Oracle perfect NMSE)
+Gate 1-B: Oracle support value (Oracle support + LS gain)
+Gate 1-C: Estimated support value (DD support + LS gain)
+Gate 1-D: Learned fusion value (NOT YET REPAIRED — requires complex-gain tokens
+          and explicit physical reconstruction layer)
+
+Design rules:
+  - Test bank is FIXED across all seeds (seed=base_seed + 10000)
+  - Training data varies per seed (seed=run_seed)
+  - Non-learned baselines run once on the fixed test bank
+  - Multi-seed results report hierarchical CI (seed-level + sample-level)
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -20,10 +35,22 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from ld3.channel import generate_path_set, synthesize_tf_channel
 from ld3.config import ChannelConfig, OFDMConfig
 from ld3.dataset import DatasetConfig, SyntheticOFDMISACDataset
-from ld3.metrics import nmse_loss, nmse_torch
+from ld3.dd_estimation import (
+    build_dd_grid,
+    detect_paths_nms,
+    masked_matched_filter_map,
+)
+from ld3.metrics import nmse_loss, nmse_numpy, nmse_torch
 from ld3.models import PhysicsGuidedCrossAttention, TFOnlyEstimator
+from ld3.oracle import (
+    estimated_support_ls_reconstruction,
+    oracle_perfect_reconstruction,
+    oracle_support_ls_reconstruction,
+)
+from ld3.pilots import make_pilot_mask, observe_pilots
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -47,6 +74,90 @@ def seed_everything(seed: int) -> None:
 
 def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device) for key, value in batch.items()}
+
+
+# ---------------------------------------------------------------------------
+# Non-learned baselines (run once on FIXED test bank)
+# ---------------------------------------------------------------------------
+
+
+def evaluate_non_learned_baselines(
+    ofdm: OFDMConfig,
+    channel: ChannelConfig,
+    cfg: DatasetConfig,
+    estimator_config: dict[str, Any],
+) -> dict[str, dict[str, float]]:
+    """Evaluate Oracle perfect, Oracle+LS, and DD+LS on a fixed dataset."""
+    rng = np.random.default_rng([cfg.seed, 9999])
+    grid = build_dd_grid(
+        ofdm.num_subcarriers, ofdm.num_symbols,
+        channel.max_delay_bins, channel.max_abs_doppler_bins,
+        int(estimator_config.get("oversample_delay", 2)),
+        int(estimator_config.get("oversample_doppler", 4)),
+    )
+
+    nmse_perfect_vals: list[float] = []
+    nmse_oracle_support_ls_vals: list[float] = []
+    nmse_estimated_support_ls_vals: list[float] = []
+    nmse_initial_vals: list[float] = []
+
+    for idx in range(cfg.size):
+        rng_sample = np.random.default_rng([cfg.seed, idx])
+        paths = generate_path_set(ofdm, channel, rng_sample)
+        truth = synthesize_tf_channel(ofdm, paths)
+        snr_db = rng_sample.uniform(cfg.snr_min_db, cfg.snr_max_db)
+        mask = make_pilot_mask(
+            ofdm.num_subcarriers, ofdm.num_symbols,
+            cfg.pilot_density, rng_sample, cfg.pilot_pattern,
+        )
+        observed, _ = observe_pilots(truth, mask, snr_db, rng_sample)
+
+        # Nearest-neighbour interpolation
+        from ld3.interpolation import nearest_smooth_interpolation
+        initial = nearest_smooth_interpolation(observed, mask)
+        nmse_initial_vals.append(nmse_numpy(initial, truth))
+
+        # Gate 1-A: Oracle perfect
+        H_perfect = oracle_perfect_reconstruction(ofdm, paths)
+        nmse_perfect_vals.append(nmse_numpy(H_perfect, truth))
+
+        # Gate 1-B: Oracle support + LS
+        H_oracle_ls = oracle_support_ls_reconstruction(ofdm, paths, observed, mask)
+        nmse_oracle_support_ls_vals.append(nmse_numpy(H_oracle_ls, truth))
+
+        # Gate 1-C: DD-estimated support + LS
+        score_map, gain_map = masked_matched_filter_map(observed, mask, grid)
+        est_paths = detect_paths_nms(
+            score_map, gain_map, grid,
+            num_paths=channel.num_paths,
+            delay_radius=int(estimator_config.get("nms_delay_radius", 2)),
+            doppler_radius=int(estimator_config.get("nms_doppler_radius", 2)),
+        )
+        H_dd_ls = estimated_support_ls_reconstruction(
+            ofdm, est_paths, observed, mask
+        )
+        nmse_estimated_support_ls_vals.append(nmse_numpy(H_dd_ls, truth))
+
+    def stats(vals: list[float]) -> dict[str, float]:
+        arr = np.array(vals)
+        return {
+            "nmse_linear": float(np.mean(arr)),
+            "nmse_db": float(10.0 * np.log10(np.mean(arr))),
+            "nmse_std": float(np.std(arr, ddof=1)),
+            "n_samples": len(vals),
+        }
+
+    return {
+        "nmse_oracle_perfect": stats(nmse_perfect_vals),
+        "nmse_oracle_support_ls": stats(nmse_oracle_support_ls_vals),
+        "nmse_estimated_support_ls": stats(nmse_estimated_support_ls_vals),
+        "nmse_initial_interpolation": stats(nmse_initial_vals),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Learned model evaluation
+# ---------------------------------------------------------------------------
 
 
 def evaluate(
@@ -142,109 +253,320 @@ def train_model(
             losses.append(float(loss.detach().cpu()))
         row = {"epoch": float(epoch), "train_nmse": float(np.mean(losses))}
         history.append(row)
-        print(f"epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}")
+        print(f"  epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}")
     return history
+
+
+# ---------------------------------------------------------------------------
+# Hierarchical bootstrap: accounts for both seed-level and sample-level variance
+# ---------------------------------------------------------------------------
+
+
+def hierarchical_bootstrap_seeds(
+    per_seed_nmse: list[np.ndarray],
+    n_bootstrap: int = 5000,
+) -> dict[str, float]:
+    """Compute CI on mean NMSE across seeds, resampling both seeds and samples."""
+    if len(per_seed_nmse) < 2:
+        arr = per_seed_nmse[0]
+        return {
+            "mean": float(np.mean(arr)),
+            "ci_lower": float("nan"),
+            "ci_upper": float("nan"),
+            "n_seeds": len(per_seed_nmse),
+        }
+    rng = np.random.default_rng(42)
+    means = np.zeros(n_bootstrap)
+    for i in range(n_bootstrap):
+        # Resample seeds
+        seed_idx = rng.choice(len(per_seed_nmse), size=len(per_seed_nmse), replace=True)
+        # Within each selected seed, resample samples
+        seed_means = []
+        for si in seed_idx:
+            samples = per_seed_nmse[si]
+            sample_idx = rng.choice(len(samples), size=len(samples), replace=True)
+            seed_means.append(float(np.mean(samples[sample_idx])))
+        means[i] = float(np.mean(seed_means))
+    return {
+        "mean": float(np.mean([float(np.mean(s)) for s in per_seed_nmse])),
+        "ci_lower": float(np.percentile(means, 2.5)),
+        "ci_upper": float(np.percentile(means, 97.5)),
+        "n_seeds": len(per_seed_nmse),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def run(config: dict[str, Any], output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    seed = int(config["seed"])
-    seed_everything(seed)
+    base_seed = int(config["seed"])
     device = choose_device(str(config["device"]))
     ofdm = OFDMConfig(**config["ofdm"])
     channel = ChannelConfig(**config["channel"])
     data_cfg = config["dataset"]
     training = config["training"]
     torch.set_num_threads(max(1, int(training.get("num_threads", 4))))
+    num_seeds = int(training.get("num_seeds", 1))
+    estimator_cfg = config.get("estimator", {})
 
-    train_cfg = DatasetConfig(
-        size=int(data_cfg["train_size"]),
+    # --- Fixed test bank (SAME for all seeds) ---
+    test_cfg_fixed = DatasetConfig(
+        size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
         snr_max_db=float(data_cfg["snr_max_db"]),
         pilot_density=float(data_cfg["pilot_density"]),
         pilot_pattern=str(data_cfg["pilot_pattern"]),
         max_paths=int(data_cfg["max_paths"]),
-        seed=seed,
-    )
-    test_cfg = replace(train_cfg, size=int(data_cfg["test_size"]), seed=seed + 10000)
-    train_set = SyntheticOFDMISACDataset(ofdm, channel, train_cfg)
-    test_set = SyntheticOFDMISACDataset(ofdm, channel, test_cfg)
-    generator = torch.Generator().manual_seed(seed)
-    train_loader = DataLoader(
-        train_set,
-        batch_size=int(training["batch_size"]),
-        shuffle=True,
-        num_workers=0,
-        generator=generator,
-    )
-    test_loader = DataLoader(
-        test_set,
-        batch_size=int(training["batch_size"]),
-        shuffle=False,
-        num_workers=0,
+        seed=base_seed + 10000,  # FIXED — never changes
     )
 
-    hidden_dim = int(training["hidden_dim"])
-    models: dict[str, tuple[torch.nn.Module, bool]] = {
-        "tf_only": (TFOnlyEstimator(hidden_dim), False),
-        "physics_cross_attention": (
-            PhysicsGuidedCrossAttention(
-                hidden_dim=hidden_dim,
-                token_dim=hidden_dim,
-                max_delay_bins=channel.max_delay_bins,
-                max_abs_doppler_bins=channel.max_abs_doppler_bins,
-            ),
-            True,
-        ),
-    }
+    # --- Non-learned baselines (run ONCE on fixed test bank) ---
+    print("Evaluating non-learned baselines (Gate 1-A, 1-B, 1-C)...")
+    non_learned_test = evaluate_non_learned_baselines(
+        ofdm, channel, test_cfg_fixed, estimator_cfg
+    )
 
-    results: dict[str, Any] = {
+    all_results: dict[str, Any] = {
         "device": str(device),
         "config": config,
-        "models": {},
+        "test_bank_seed": base_seed + 10000,
+        "non_learned_baselines": {"test": non_learned_test},
+        "seeds": {},
     }
-    for name, (model, is_cross) in models.items():
-        print(f"\nTraining {name} on {device}")
-        history = train_model(
-            model,
-            train_loader,
-            device,
-            epochs=int(training["epochs"]),
-            learning_rate=float(training["learning_rate"]),
-            weight_decay=float(training["weight_decay"]),
-            is_cross=is_cross,
-        )
-        metrics = evaluate(model, test_loader, device, is_cross, token_mode="oracle")
-        evaluations = {"oracle": metrics}
-        if is_cross:
-            evaluations["shuffled"] = evaluate(
-                model, test_loader, device, is_cross, token_mode="shuffled"
-            )
-            evaluations["null"] = evaluate(
-                model, test_loader, device, is_cross, token_mode="null"
-            )
-        results["models"][name] = {
-            "history": history,
-            "test": metrics,
-            "evaluations": evaluations,
-            "parameters": int(sum(p.numel() for p in model.parameters())),
-        }
-        torch.save(model.state_dict(), output_dir / f"{name}.pt")
-        print(f"{name}: test NMSE={metrics['nmse_db']:.3f} dB")
 
-    cross_nmse = results["models"]["physics_cross_attention"]["test"]["nmse_db"]
-    tf_nmse = results["models"]["tf_only"]["test"]["nmse_db"]
-    results["oracle_cross_attention_gain_db"] = float(tf_nmse - cross_nmse)
-    cross_evals = results["models"]["physics_cross_attention"]["evaluations"]
-    results["oracle_vs_shuffled_gain_db"] = float(
-        cross_evals["shuffled"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
-    )
-    results["oracle_vs_null_gain_db"] = float(
-        cross_evals["null"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
-    )
+    hidden_dim = int(training["hidden_dim"])
+
+    # --- Per-seed learned model records (for hierarchical bootstrap) ---
+    per_seed_tf_nmse: list[np.ndarray] = []
+    per_seed_cross_nmse: list[np.ndarray] = []
+    per_seed_cross_shuffled_nmse: list[np.ndarray] = []
+    per_seed_cross_null_nmse: list[np.ndarray] = []
+
+    for seed_idx in range(num_seeds):
+        run_seed = base_seed + seed_idx * 1000
+        print(f"\n{'='*60}")
+        print(f"Seed {seed_idx + 1}/{num_seeds} (seed={run_seed})")
+        print(f"{'='*60}")
+
+        seed_everything(run_seed)
+
+        # Training data varies per seed; test bank is FIXED
+        train_cfg = DatasetConfig(
+            size=int(data_cfg["train_size"]),
+            snr_min_db=float(data_cfg["snr_min_db"]),
+            snr_max_db=float(data_cfg["snr_max_db"]),
+            pilot_density=float(data_cfg["pilot_density"]),
+            pilot_pattern=str(data_cfg["pilot_pattern"]),
+            max_paths=int(data_cfg["max_paths"]),
+            seed=run_seed,
+        )
+        train_set = SyntheticOFDMISACDataset(ofdm, channel, train_cfg)
+        test_set = SyntheticOFDMISACDataset(ofdm, channel, test_cfg_fixed)
+
+        generator = torch.Generator().manual_seed(run_seed)
+        train_loader = DataLoader(
+            train_set,
+            batch_size=int(training["batch_size"]),
+            shuffle=True,
+            num_workers=0,
+            generator=generator,
+        )
+        test_loader = DataLoader(
+            test_set,
+            batch_size=int(training["batch_size"]),
+            shuffle=False,
+            num_workers=0,
+        )
+
+        models: dict[str, tuple[torch.nn.Module, bool]] = {
+            "tf_only": (TFOnlyEstimator(hidden_dim), False),
+            "physics_cross_attention": (
+                PhysicsGuidedCrossAttention(
+                    hidden_dim=hidden_dim,
+                    token_dim=hidden_dim,
+                    max_delay_bins=channel.max_delay_bins,
+                    max_abs_doppler_bins=channel.max_abs_doppler_bins,
+                ),
+                True,
+            ),
+        }
+
+        seed_results: dict[str, Any] = {}
+        for name, (model, is_cross) in models.items():
+            print(f"\nTraining {name} on {device}")
+            history = train_model(
+                model,
+                train_loader,
+                device,
+                epochs=int(training["epochs"]),
+                learning_rate=float(training["learning_rate"]),
+                weight_decay=float(training["weight_decay"]),
+                is_cross=is_cross,
+            )
+            metrics = evaluate(model, test_loader, device, is_cross, token_mode="oracle")
+            evaluations = {"oracle": metrics}
+
+            # Collect per-sample NMSE for hierarchical bootstrap
+            model.eval()
+            sample_nmse: list[float] = []
+            with torch.no_grad():
+                for batch in test_loader:
+                    batch = move_batch(batch, device)
+                    if is_cross:
+                        output, _ = model(
+                            batch["tf_input"], batch["path_tokens"], batch["path_valid"]
+                        )
+                    else:
+                        output = model(batch["tf_input"])
+                    per_sample = nmse_torch(output, batch["target"]).cpu().numpy()
+                    sample_nmse.extend(per_sample.tolist())
+            sample_nmse_arr = np.array(sample_nmse, dtype=np.float64)
+
+            if is_cross:
+                eval_shuffled = evaluate(
+                    model, test_loader, device, is_cross, token_mode="shuffled"
+                )
+                eval_null = evaluate(
+                    model, test_loader, device, is_cross, token_mode="null"
+                )
+                evaluations["shuffled"] = eval_shuffled
+                evaluations["null"] = eval_null
+
+                # Collect per-sample NMSE for shuffled/null
+                shuffled_nmse: list[float] = []
+                null_nmse: list[float] = []
+                with torch.no_grad():
+                    for batch in test_loader:
+                        batch = move_batch(batch, device)
+                        # shuffled
+                        pt = batch["path_tokens"]
+                        pv = batch["path_valid"]
+                        if pt.shape[0] > 1:
+                            perm = torch.roll(torch.arange(pt.shape[0], device=device), shifts=1)
+                            pt_s = pt[perm]
+                            pv_s = pv[perm]
+                        else:
+                            pt_s, pv_s = pt, pv
+                        out_s, _ = model(batch["tf_input"], pt_s, pv_s)
+                        shuffled_nmse.extend(
+                            nmse_torch(out_s, batch["target"]).cpu().numpy().tolist()
+                        )
+                        # null
+                        pv_n = torch.zeros_like(pv)
+                        out_n, _ = model(batch["tf_input"], pt, pv_n)
+                        null_nmse.extend(
+                            nmse_torch(out_n, batch["target"]).cpu().numpy().tolist()
+                        )
+                per_seed_cross_shuffled_nmse.append(np.array(shuffled_nmse))
+                per_seed_cross_null_nmse.append(np.array(null_nmse))
+
+            if name == "tf_only":
+                per_seed_tf_nmse.append(sample_nmse_arr)
+            else:
+                per_seed_cross_nmse.append(sample_nmse_arr)
+
+            seed_results[name] = {
+                "history": history,
+                "test": metrics,
+                "evaluations": evaluations,
+                "parameters": int(sum(p.numel() for p in model.parameters())),
+            }
+            torch.save(model.state_dict(), output_dir / f"{name}_seed{seed_idx}.pt")
+            print(f"  {name}: test NMSE={metrics['nmse_db']:.3f} dB")
+
+        # Per-seed diagnostic gains
+        cross_nmse_db = seed_results["physics_cross_attention"]["test"]["nmse_db"]
+        tf_nmse_db = seed_results["tf_only"]["test"]["nmse_db"]
+        seed_results["oracle_cross_attention_gain_db"] = float(tf_nmse_db - cross_nmse_db)
+        cross_evals = seed_results["physics_cross_attention"]["evaluations"]
+        seed_results["oracle_vs_shuffled_gain_db"] = float(
+            cross_evals["shuffled"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
+        )
+        seed_results["oracle_vs_null_gain_db"] = float(
+            cross_evals["null"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
+        )
+        all_results["seeds"][f"seed_{run_seed}"] = seed_results
+
+    # --- Hierarchical bootstrap across seeds ---
+    if num_seeds > 1 and per_seed_tf_nmse:
+        all_results["hierarchical_bootstrap"] = {
+            "tf_only_nmse_linear": hierarchical_bootstrap_seeds(per_seed_tf_nmse),
+            "cross_attention_nmse_linear": hierarchical_bootstrap_seeds(per_seed_cross_nmse),
+        }
+        if per_seed_cross_shuffled_nmse:
+            all_results["hierarchical_bootstrap"]["cross_attention_shuffled_nmse_linear"] = (
+                hierarchical_bootstrap_seeds(per_seed_cross_shuffled_nmse)
+            )
+            all_results["hierarchical_bootstrap"]["cross_attention_null_nmse_linear"] = (
+                hierarchical_bootstrap_seeds(per_seed_cross_null_nmse)
+            )
+
+    # --- Gate 1 status matrix ---
+    nmse_perfect = non_learned_test["nmse_oracle_perfect"]["nmse_db"]
+    nmse_oracle_ls = non_learned_test["nmse_oracle_support_ls"]["nmse_db"]
+    nmse_est_ls = non_learned_test["nmse_estimated_support_ls"]["nmse_db"]
+    nmse_initial = non_learned_test["nmse_initial_interpolation"]["nmse_db"]
+
+    all_results["gate_1_status"] = {
+        "gate_1A_physical_closure": {
+            "status": "PASS" if nmse_perfect < -80 else "CHECK",
+            "nmse_oracle_perfect_db": nmse_perfect,
+            "note": "Should approach numerical precision (~ -100 dB in float64). "
+                    "If > -80 dB, check delay/Doppler sign convention, normalisation, "
+                    "or path truncation.",
+        },
+        "gate_1B_oracle_support_value": {
+            "status": "READY",
+            "nmse_oracle_support_ls_db": nmse_oracle_ls,
+            "nmse_initial_db": nmse_initial,
+            "gain_over_initial_db": float(nmse_initial - nmse_oracle_ls),
+            "note": "Oracle support + LS vs nearest-neighbour interpolation. "
+                    "Positive gain means true DD locations add value with estimated gains.",
+        },
+        "gate_1C_estimated_support_value": {
+            "status": "READY",
+            "nmse_estimated_support_ls_db": nmse_est_ls,
+            "delta_support_db": float(nmse_oracle_ls - nmse_est_ls),
+            "note": "DD-estimated support + LS vs Oracle support + LS. "
+                    "Δ_support measures the cost of using DD-estimated (not true) locations.",
+        },
+        "gate_1D_learned_fusion_value": {
+            "status": "NOT_YET_REPAIRED",
+            "note": "Current cross-attention uses 7-dim tokens without complex gain. "
+                    "Next revision must add (Re α, Im α) to tokens and implement "
+                    "explicit physical reconstruction + TF residual gated fusion.",
+        },
+    }
+
     with (output_dir / "gate1_results.json").open("w", encoding="utf-8") as handle:
-        json.dump(results, handle, indent=2)
-    print(f"\nGate 1 result written to {output_dir / 'gate1_results.json'}")
+        json.dump(all_results, handle, indent=2)
+    print(f"\nGate 1 results → {output_dir / 'gate1_results.json'}")
+
+    # Summary print
+    print(f"\n{'='*60}")
+    print("Gate 1 Summary")
+    print(f"{'='*60}")
+    print(f"\n--- Non-learned baselines (fixed test bank) ---")
+    print(f"  Gate 1-A (Oracle perfect):       NMSE={nmse_perfect:+.3f} dB")
+    print(f"  Gate 1-B (Oracle support + LS):  NMSE={nmse_oracle_ls:+.3f} dB")
+    print(f"  Gate 1-C (Estimated support + LS): NMSE={nmse_est_ls:+.3f} dB")
+    print(f"  Initial interpolation:           NMSE={nmse_initial:+.3f} dB")
+    print(f"  Δ_gain   = Oracle+LS - Perfect  = {nmse_oracle_ls - nmse_perfect:+.3f} dB")
+    print(f"  Δ_support = Est+LS - Oracle+LS  = {nmse_est_ls - nmse_oracle_ls:+.3f} dB")
+    if num_seeds > 1:
+        hb = all_results.get("hierarchical_bootstrap", {})
+        if "tf_only_nmse_linear" in hb:
+            tf_hb = hb["tf_only_nmse_linear"]
+            cross_hb = hb["cross_attention_nmse_linear"]
+            print(f"\n--- Learned models ({num_seeds} seeds, hierarchical bootstrap) ---")
+            print(f"  TF-only NMSE linear:       {tf_hb['mean']:.6f} [{tf_hb['ci_lower']:.6f}, {tf_hb['ci_upper']:.6f}]")
+            print(f"  Cross-attention NMSE linear: {cross_hb['mean']:.6f} [{cross_hb['ci_lower']:.6f}, {cross_hb['ci_upper']:.6f}]")
+    print(f"\n--- Gate 1 Status ---")
+    for gate, info in all_results["gate_1_status"].items():
+        print(f"  {gate}: {info['status']}")
 
 
 def main() -> None:
@@ -258,6 +580,7 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--train-size", type=int, default=None)
     parser.add_argument("--test-size", type=int, default=None)
+    parser.add_argument("--num-seeds", type=int, default=None)
     args = parser.parse_args()
     config = load_config(args.config)
     if args.epochs is not None:
@@ -266,6 +589,8 @@ def main() -> None:
         config["dataset"]["train_size"] = args.train_size
     if args.test_size is not None:
         config["dataset"]["test_size"] = args.test_size
+    if args.num_seeds is not None:
+        config["training"]["num_seeds"] = args.num_seeds
     run(config, args.output_dir)
 
 

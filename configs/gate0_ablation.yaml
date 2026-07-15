@@ -1,0 +1,39 @@
+# Gate 0 ablation config: isolate off-grid leakage from NMS/SNR bottlenecks.
+#
+# Usage:
+#   python experiments/gate0_identifiability.py --config configs/gate0_ablation.yaml --output-dir results/gate0_ablation
+#   python experiments/gate0_identifiability.py --config configs/gate0_ablation.yaml --output-dir results/gate0_ablation --ablation-integer-bins
+#   python experiments/gate0_identifiability.py --config configs/gate0_ablation.yaml --output-dir results/gate0_ablation --ablation-oracle-nms
+#
+# Ablation cases (per the analysis):
+#   Case I:   --ablation-integer-bins                          (pure noise + sampling limits)
+#   Case F:   (default, fractional bins)                      (off-grid leakage present)
+#   Case F+Oracle: --ablation-oracle-nms                      (ideal peak selection → isolate NMS bottleneck)
+
+seed: 2036
+trials: 500
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+sweep:
+  snr_db: [-5, 0, 5, 10, 15, 20, 25, 30]
+  pilot_density: [0.125]
+  pilot_pattern: [random]
+estimator:
+  oversample_delay: 2
+  oversample_doppler: 4
+  delay_tolerance_bins: 0.75
+  doppler_tolerance_bins: 0.5
+  nms_delay_radius: 2
+  nms_doppler_radius: 2
+  relative_threshold: 0.08

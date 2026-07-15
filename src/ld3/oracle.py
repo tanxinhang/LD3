@@ -4,6 +4,12 @@ import numpy as np
 
 from .channel import PathSet, synthesize_tf_channel
 from .config import OFDMConfig
+from .dd_estimation import EstimatedPaths
+
+
+# ---------------------------------------------------------------------------
+# Oracle path tokens
+# ---------------------------------------------------------------------------
 
 
 def oracle_path_tokens(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.ndarray]:
@@ -11,6 +17,10 @@ def oracle_path_tokens(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.n
 
     Token fields: delay_bin, doppler_bin, normalized power, confidence,
     sigma_delay, sigma_doppler, communication relevance.
+
+    NOTE: this 7-dim token does NOT include complex gain (Re α, Im α).
+    The model fix adding complex-gain tokens is planned for the next revision
+    (Gate 1-D: learned fusion value).
     """
 
     tokens = np.zeros((max_paths, 7), dtype=np.float32)
@@ -28,10 +38,167 @@ def oracle_path_tokens(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.n
     return tokens, valid
 
 
-def oracle_parametric_reconstruction(ofdm: OFDMConfig, paths: PathSet) -> np.ndarray:
-    """Perfect path-parameter reconstruction used as a diagnostic upper bound."""
+# ---------------------------------------------------------------------------
+# Oracle parametric reconstruction (upper bound / code-closure test)
+# ---------------------------------------------------------------------------
 
+
+def oracle_perfect_reconstruction(ofdm: OFDMConfig, paths: PathSet) -> np.ndarray:
+    """Perfect reconstruction from true path parameters.
+
+    This should approach numerical precision (~ -100 dB NMSE in float64) if
+    the synthesis formulas are closed — it is a code-closure test, not an
+    algorithm result.
+
+    Returns the TF channel H[n, m] synthesised from true {τ, ν, α}.
+    """
     return synthesize_tf_channel(ofdm, paths)
+
+
+# ---------------------------------------------------------------------------
+# Ridge LS helper
+# ---------------------------------------------------------------------------
+
+
+def _ridge_ls(
+    A: np.ndarray,
+    y: np.ndarray,
+    ridge_relative: float = 1e-6,
+) -> np.ndarray:
+    """Solve min ||A x - y||² + λ||x||² with trace-scaled regularisation.
+
+    λ = ridge_relative * tr(A^H A) / L   where L = number of columns.
+
+    This keeps regularisation strength consistent across different numbers
+    of pilots and paths.
+    """
+    n_cols = A.shape[1]
+    if n_cols == 0:
+        return np.zeros(0, dtype=np.complex128)
+    gram = A.conj().T @ A
+    trace_gram = np.trace(gram).real
+    ridge = ridge_relative * trace_gram / max(n_cols, 1)
+    rhs = A.conj().T @ y
+    return np.linalg.solve(gram + ridge * np.eye(n_cols), rhs)
+
+
+# ---------------------------------------------------------------------------
+# Oracle support + LS complex-gain
+# ---------------------------------------------------------------------------
+
+
+def oracle_support_ls_reconstruction(
+    ofdm: OFDMConfig,
+    paths: PathSet,
+    pilot_observations: np.ndarray,
+    pilot_mask: np.ndarray,
+) -> np.ndarray:
+    """Oracle DD support + LS complex-gain estimation.
+
+    Given TRUE DD path locations {τ, ν}, estimate complex gains via
+    trace-regularised LS on raw pilot observations, then reconstruct the
+    full TF channel.
+
+    NMSE(·, H_true) isolates the gain-estimation error Δ_gain:
+        Δ_gain = NMSE(oracle_support_ls) - NMSE(oracle_perfect)
+
+    Returns H_rec[n, m].
+    """
+    n_sc = ofdm.num_subcarriers
+    n_sym = ofdm.num_symbols
+    n_paths = len(paths.gains)
+
+    if n_paths == 0:
+        return np.zeros((n_sc, n_sym), dtype=np.complex128)
+
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        raise ValueError("pilot mask contains no observations")
+
+    # Build dictionary at pilot locations using TRUE path parameters
+    A_pilot = np.zeros((n_idx.size, n_paths), dtype=np.complex128)
+    for l in range(n_paths):
+        delay_phase = np.exp(-2j * np.pi * n_idx * paths.delay_bins[l] / n_sc)
+        doppler_phase = np.exp(2j * np.pi * m_idx * paths.doppler_bins[l] / n_sym)
+        A_pilot[:, l] = delay_phase * doppler_phase
+
+    y = pilot_observations[pilot_mask]
+    g_hat = _ridge_ls(A_pilot, y)
+
+    # Reconstruct full TF channel with estimated gains
+    return _synthesize_from_params(
+        n_sc, n_sym, paths.delay_bins, paths.doppler_bins, g_hat
+    )
+
+
+# ---------------------------------------------------------------------------
+# DD-estimated support + LS complex-gain
+# ---------------------------------------------------------------------------
+
+
+def estimated_support_ls_reconstruction(
+    ofdm: OFDMConfig,
+    est: EstimatedPaths,
+    pilot_observations: np.ndarray,
+    pilot_mask: np.ndarray,
+) -> np.ndarray:
+    """DD-estimated support + LS complex-gain reconstruction.
+
+    Uses DD-ESTIMATED (not true) path locations.  This bridges Gate 0 and
+    Gate 1: it measures how well DD-identified support translates to TF
+    channel NMSE.
+
+    NMSE(·, H_true) isolates the support-estimation error Δ_support:
+        Δ_support = NMSE(estimated_support_ls) - NMSE(oracle_support_ls)
+
+    Returns H_rec[n, m].
+    """
+    n_sc = ofdm.num_subcarriers
+    n_sym = ofdm.num_symbols
+    n_paths = len(est.delay_bins)
+
+    if n_paths == 0:
+        return np.zeros((n_sc, n_sym), dtype=np.complex128)
+
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        raise ValueError("pilot mask contains no observations")
+
+    A_pilot = np.zeros((n_idx.size, n_paths), dtype=np.complex128)
+    for l in range(n_paths):
+        delay_phase = np.exp(-2j * np.pi * n_idx * est.delay_bins[l] / n_sc)
+        doppler_phase = np.exp(2j * np.pi * m_idx * est.doppler_bins[l] / n_sym)
+        A_pilot[:, l] = delay_phase * doppler_phase
+
+    y = pilot_observations[pilot_mask]
+    g_hat = _ridge_ls(A_pilot, y)
+
+    return _synthesize_from_params(
+        n_sc, n_sym, est.delay_bins, est.doppler_bins, g_hat
+    )
+
+
+def _synthesize_from_params(
+    n_sc: int,
+    n_sym: int,
+    delay_bins: np.ndarray,
+    doppler_bins: np.ndarray,
+    gains: np.ndarray,
+) -> np.ndarray:
+    """Synthesise TF channel from explicit {τ, ν, α} parameters."""
+    H = np.zeros((n_sc, n_sym), dtype=np.complex128)
+    n_arr = np.arange(n_sc, dtype=np.float64)[:, None]
+    m_arr = np.arange(n_sym, dtype=np.float64)[None, :]
+    for l in range(len(gains)):
+        delay_phase = np.exp(-2j * np.pi * n_arr * delay_bins[l] / n_sc)
+        doppler_phase = np.exp(2j * np.pi * m_arr * doppler_bins[l] / n_sym)
+        H += gains[l] * delay_phase * doppler_phase
+    return H
+
+
+# ---------------------------------------------------------------------------
+# Token perturbation (Gate 2)
+# ---------------------------------------------------------------------------
 
 
 def perturb_tokens(

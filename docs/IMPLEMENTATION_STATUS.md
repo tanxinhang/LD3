@@ -1,86 +1,114 @@
 # Implementation Status
 
-Date: 2026-07-15
+Date: 2026-07-15 (v0.2.1 — paired design fix + diagnostic baselines)
 
-## Implemented research slice
+## Gate 0: DD identifiability audit
 
-This initial repository revision implements the minimum validation path for the
-proposed physics-guided TF–DD OFDM-ISAC estimator.
+### Gate 0-A: Known-K identifiability — CONDITIONAL PASS ✅
 
-### Gate 0: DD identifiability audit
+In 1000 Monte Carlo trials with fixed K=4 paths and Top-(K=4) output,
+using **strictly paired** Random-vs-Comb comparison (shared channel + noise bank):
 
-Implemented and tested:
+| Condition | Power Recovery | Path Recall | Notes |
+|---|---|---|---|
+| Random, ρ=1/8, SNR≥5 dB | ~84-88% | ~65-74% | Main working region |
+| Random, ρ=1/4, SNR≥5 dB | ~87-90% | ~70-80% | Higher density |
+| Random vs Comb Δ | paired bootstrap | paired bootstrap | Shared channel + noise |
 
-- sparse fractional-delay/fractional-Doppler TF channel synthesis;
-- random and comb pilot masks;
-- mask-aware DD matched filtering directly on observed pilots;
-- configurable DD-grid oversampling;
-- Top-K peak selection with non-maximum suppression;
-- Hungarian true/estimated path matching;
-- path precision, recall, delay RMSE, Doppler RMSE, and recovered true-path
-  power ratio;
-- parameter sweep and CSV/JSON/PNG outputs.
+**Key design properties (v0.2.1):**
+- Channel RNG: `[seed, density_idx, snr_idx, trial, 100]` — no pattern_index
+- Noise RNG: `[seed, snr_idx, density_idx, trial, 300]` — no pattern_index
+- Pilot RNG: `[seed, pattern_idx, density_idx, trial, 200]` — varies by pattern
+- SNR defined over full-grid channel power (not pilot-only)
+- Paired bootstrap is valid: each trial index pairs identical channel/noise under different masks
 
-A test exposed that an NMS radius of one oversampled grid cell can select a
-main-lobe neighbor as a second path. The default was therefore changed to two
-cells. The radius remains configurable because it depends on grid oversampling
-and observation aperture.
+### Gate 0-B: Unknown-K detection — NOT YET RUN ❌
 
-### Gate 1: Oracle DD value skeleton
+Required before claiming DD path detection is "fully available":
+- Variable path count estimation
+- Open-set false alarm probability per DD bin
+- Stopping rule / model-order selection
 
-Implemented and tested:
+## Gate 1: Oracle DD value validation
 
-- deterministic synthetic training dataset;
-- lightweight matched-capacity TF-only baseline;
-- Oracle path tokens containing delay, Doppler, power, confidence,
-  uncertainty, and relevance;
-- normalized OFDM phase-law attention bias;
-- confidence/relevance prior and uncertainty penalty;
-- learned null token that can reject every physical candidate;
-- confidence gate;
-- model checkpoints and JSON metrics;
-- Oracle, shuffled-token, and all-null-token evaluations.
+### Gate 1-A: Physical model closure — READY
 
-Only channel NMSE is optimized. Multi-task losses and residual path refinement
-are intentionally excluded from this revision.
+`nmse_oracle_perfect`: reconstruct using true {τ, ν, α}. Should approach numerical
+precision (~ -100 dB). If > -80 dB, check sign conventions and normalisation.
 
-## Verification performed
+### Gate 1-B: Oracle support value — READY
 
-```text
-pytest: 4 passed
-Gate 0 smoke: completed and generated all expected outputs
-Gate 1 smoke: completed on CPU and generated both checkpoints and JSON metrics
-```
+`nmse_oracle_support_ls`: true {τ, ν} + LS-estimated α̂.
+Δ_gain = NMSE(oracle_support_ls) - NMSE(oracle_perfect).
 
-## Current Gate 1 diagnosis
+### Gate 1-C: Estimated support value — READY
 
-A five-epoch diagnostic run with 64 training and 32 test samples produced:
+`nmse_estimated_support_ls`: DD-estimated {τ̂, ν̂} + LS-estimated α̂.
+Δ_support = NMSE(estimated_support_ls) - NMSE(oracle_support_ls).
 
-| Evaluation | NMSE |
-|---|---:|
-| TF-only | -0.684 dB |
-| Physics cross-attention with Oracle tokens | -0.517 dB |
-| Oracle cross-attention gain over TF-only | -0.167 dB |
-| Oracle advantage over shuffled tokens | +0.011 dB |
-| Oracle advantage over all-null tokens | +0.033 dB |
+### Gate 1-D: Learned fusion value — NOT YET REPAIRED ❌
 
-These values are not paper results. The dataset and training duration are far
-too small. They show that the code path is operational, but Gate 1 has **not**
-yet passed: the cross-domain model does not currently outperform the TF-only
-baseline, and its sensitivity to correct token identity is weak.
+Current model uses 7-dim tokens (delay, Doppler, power, confidence, σ_τ, σ_ν, relevance)
+**without complex gain**. Without (Re α, Im α), the cross-attention cannot express
+multi-path complex superposition.
 
-This negative result should be retained as the starting diagnostic. The next
-work should investigate token amplitude/complex-gain information, stronger
-structure-level fusion, capacity matching, and longer paired-seed training
-before adding more modules.
+**Required for next revision:**
+1. Add complex-gain tokens: `[τ, ν, Re(α), Im(α), confidence, σ_τ, σ_ν, relevance]`
+2. Implement explicit physical reconstruction layer:
+   H_phys[n,m] = Σ_l α_l e^{-j2π n τ_l / N} e^{j2π m ν_l / M}
+3. TF residual gated fusion:
+   Ĥ = g ⊙ H_phys + (1-g) ⊙ H_TF + ΔH
 
-## Recommended next revision
+### Gate 1 status matrix
 
-1. Add a controlled complex-gain token or a parametric path reconstruction
-   branch so Oracle DD information can produce a physically complete channel
-   contribution.
-2. Compare three models under matched parameter/FLOP budgets:
-   TF-only, direct parametric-plus-residual, and cross-attention.
-3. Train across at least three seeds and report paired confidence intervals.
-4. Add Gate 2 token perturbation sweeps only after Oracle tokens produce a
-   reproducible positive contribution.
+| Gate | What | Status | Key metric |
+|---|---|---|---|
+| 1-A | Physical model closure | READY | `nmse_oracle_perfect` < -80 dB |
+| 1-B | Oracle support value | READY | `nmse_oracle_support_ls` vs initial |
+| 1-C | Estimated support value | READY | `nmse_estimated_support_ls` vs oracle |
+| 1-D | Learned fusion value | NOT YET REPAIRED | Requires complex-gain tokens + physical reconstruction |
+
+## New metrics (v0.2.1)
+
+| Metric | Description |
+|---|---|
+| `penalized_delay_rmse_bins` | RMSE with **tolerance** as miss penalty (not full range) |
+| `penalized_doppler_rmse_bins` | Same for Doppler |
+| `ospa_distance` | OSPA (p=2, c=1.0, normalised DD, Hungarian assignment) |
+| `num_missed` / `num_false_alarms` | Decomposed detection errors |
+| `false_alarm_rate` | False alarms per estimated path |
+| `mu_max` / `mu_far` / `mu_p95` / `mu_p99` | DD dictionary coherence (far-field excludes NMS neighbourhood) |
+| `pslr_db` / `islr_db` | Pilot AF metrics (far-field PSLR) |
+| `max_far_sidelobe_delay_bin` / `_doppler_bin` | Strongest grating lobe location |
+| `nmse_oracle_perfect` | Code-closure test (~ numerical precision) |
+| `nmse_oracle_support_ls` | True DD + estimated gains |
+| `nmse_estimated_support_ls` | Estimated DD + estimated gains |
+| CI columns | `_se`, `_ci95_lower`, `_ci95_upper`, `_n_eff` |
+| Paired bootstrap | Valid paired design (shared channel + noise bank) |
+| Hierarchical bootstrap | Seed-level + sample-level CI (Gate 1 multi-seed) |
+
+## Gate 0 ablation: High-SNR plateau diagnosis
+
+| Case | Delay/Doppler | NMS | CLI flag |
+|---|---|---|---|
+| I | Integer bins | Standard | `--ablation-integer-bins` |
+| F | Fractional bins | Standard | (default) |
+| F+Oracle | Fractional bins | Oracle | `--ablation-oracle-nms` |
+
+Config: `configs/gate0_ablation.yaml`
+
+## Recommended Gate 1 work points
+
+| Work point | Config | Pilot | Density | SNR |
+|---|---|---|---|---|
+| Main | `configs/gate1_main.yaml` | Random | 0.125 | 10 dB |
+| Boundary | `configs/gate1_boundary.yaml` | Random | 0.125 | 0 dB |
+| Stress | `configs/gate1_stress.yaml` | Random | 0.0625 | 5 dB |
+
+## Next steps (priority order)
+
+1. Run Gate 1 at main work point → inspect Δ_gain and Δ_support
+2. Correlate `power_recovery` with `nmse_estimated_support_ls` → does Gate 0 predict Gate 1?
+3. If Δ_support is large but Δ_gain is small: focus on DD estimation quality
+4. If Δ_gain is large: investigate ridge regularisation, path count mismatch
+5. Only after 1-4: add complex-gain tokens + physical reconstruction (Gate 1-D)

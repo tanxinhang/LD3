@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from scipy.spatial.distance import cdist
+from typing import Optional
 
 
 @dataclass
@@ -17,6 +19,11 @@ class EstimatedPaths:
     doppler_bins: np.ndarray
     scores: np.ndarray
     gains: np.ndarray
+
+
+# ---------------------------------------------------------------------------
+# Grid construction
+# ---------------------------------------------------------------------------
 
 
 def build_dd_grid(
@@ -37,6 +44,11 @@ def build_dd_grid(
             doppler_count,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# DD matched filter
+# ---------------------------------------------------------------------------
 
 
 def masked_matched_filter_map(
@@ -87,6 +99,36 @@ def masked_matched_filter_map(
     return score_map, gain_map
 
 
+def build_dd_dictionary(
+    pilot_mask: np.ndarray,
+    grid: DDGrid,
+) -> np.ndarray:
+    """Build the normalised DD dictionary matrix from a pilot mask.
+
+    Returns A of shape (N_pilots, N_delay * N_doppler) with unit-norm columns.
+    """
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        raise ValueError("pilot mask contains no observations")
+    n_total, m_total = pilot_mask.shape
+
+    delay_phase = np.exp(
+        -2j * np.pi * n_idx[:, None] * grid.delay_bins[None, :] / n_total
+    )
+    doppler_phase = np.exp(
+        2j * np.pi * m_idx[:, None] * grid.doppler_bins[None, :] / m_total
+    )
+    A = (delay_phase[:, :, None] * doppler_phase[:, None, :]).reshape(n_idx.size, -1)
+    col_norm = np.linalg.norm(A, axis=0, keepdims=True)
+    A = A / np.maximum(col_norm, np.finfo(float).eps)
+    return A
+
+
+# ---------------------------------------------------------------------------
+# Peak detection
+# ---------------------------------------------------------------------------
+
+
 def detect_paths_nms(
     score_map: np.ndarray,
     gain_map: np.ndarray,
@@ -130,6 +172,46 @@ def detect_paths_nms(
     )
 
 
+def detect_paths_oracle_nms(
+    score_map: np.ndarray,
+    gain_map: np.ndarray,
+    grid: DDGrid,
+    true_delays: np.ndarray,
+    true_dopplers: np.ndarray,
+    delay_radius: int = 2,
+    doppler_radius: int = 2,
+) -> EstimatedPaths:
+    """Oracle NMS: select the grid point closest to each true path.
+
+    This is an ablation tool — it removes the peak-selection bottleneck so we
+    can isolate off-grid leakage from NMS failure modes.
+    """
+    delays: list[float] = []
+    dopplers: list[float] = []
+    scores: list[float] = []
+    gains_list: list[complex] = []
+
+    for td, tdp in zip(true_delays, true_dopplers):
+        i = int(np.argmin(np.abs(grid.delay_bins - td)))
+        j = int(np.argmin(np.abs(grid.doppler_bins - tdp)))
+        delays.append(float(grid.delay_bins[i]))
+        dopplers.append(float(grid.doppler_bins[j]))
+        scores.append(float(score_map[i, j]) / max(float(np.max(score_map)), np.finfo(float).eps))
+        gains_list.append(complex(gain_map[i, j]))
+
+    return EstimatedPaths(
+        delay_bins=np.asarray(delays, dtype=np.float64),
+        doppler_bins=np.asarray(dopplers, dtype=np.float64),
+        scores=np.asarray(scores, dtype=np.float64),
+        gains=np.asarray(gains_list, dtype=np.complex128),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Path matching
+# ---------------------------------------------------------------------------
+
+
 def match_paths(
     true_delay: np.ndarray,
     true_doppler: np.ndarray,
@@ -158,6 +240,11 @@ def match_paths(
     return matches
 
 
+# ---------------------------------------------------------------------------
+# Core identifiability metrics
+# ---------------------------------------------------------------------------
+
+
 def identifiability_metrics(
     true_delay: np.ndarray,
     true_doppler: np.ndarray,
@@ -165,7 +252,16 @@ def identifiability_metrics(
     est: EstimatedPaths,
     delay_tolerance: float,
     doppler_tolerance: float,
+    max_delay_bins: Optional[float] = None,
+    max_abs_doppler_bins: Optional[float] = None,
 ) -> dict[str, float]:
+    """Compute recall, precision, power recovery, RMSE, and advanced metrics.
+
+    Extended with:
+    - Penalized RMSE (tolerance as miss penalty — see manifest for values)
+    - OSPA distance (p=2, c=1.0, normalised DD distance)
+    - False alarm rate per estimated path
+    """
     matches = match_paths(
         true_delay,
         true_doppler,
@@ -174,11 +270,17 @@ def identifiability_metrics(
         doppler_tolerance,
     )
     matched_true = {r for r, _ in matches}
-    recall = len(matches) / max(len(true_delay), 1)
-    precision = len(matches) / max(len(est.delay_bins), 1)
+    matched_est = {c for _, c in matches}
+    n_true = max(len(true_delay), 1)
+    n_est = max(len(est.delay_bins), 1)
+
+    recall = len(matches) / n_true
+    precision = len(matches) / n_est
     recovered_power = float(np.sum([true_power[i] for i in matched_true]))
     total_power = float(np.sum(true_power))
+    power_recovery = recovered_power / max(total_power, np.finfo(float).eps)
 
+    # --- matched-path RMSE (only over successfully matched paths) ---
     if matches:
         delay_rmse = float(
             np.sqrt(
@@ -204,11 +306,423 @@ def identifiability_metrics(
         delay_rmse = float("nan")
         doppler_rmse = float("nan")
 
-    return {
+    # --- penalised RMSE: tolerance as miss penalty ---
+    # Each missed path contributes the matching tolerance as its error.
+    # This is more interpretable than the full search range: a missed path
+    # is "at least one tolerance away" from any estimated path.
+    n_miss = n_true - len(matches)
+    if matches:
+        delay_se = np.sum([(true_delay[r] - est.delay_bins[c]) ** 2 for r, c in matches])
+        doppler_se = np.sum([(true_doppler[r] - est.doppler_bins[c]) ** 2 for r, c in matches])
+    else:
+        delay_se = 0.0
+        doppler_se = 0.0
+    delay_penalty = n_miss * (delay_tolerance ** 2)
+    doppler_penalty = n_miss * (doppler_tolerance ** 2)
+    penalized_delay_rmse = float(np.sqrt((delay_se + delay_penalty) / n_true))
+    penalized_doppler_rmse = float(np.sqrt((doppler_se + doppler_penalty) / n_true))
+
+    # --- OSPA distance ---
+    ospa_val = _ospa_distance(
+        true_delay, true_doppler, est, delay_tolerance, doppler_tolerance
+    )
+
+    # --- false alarm metrics ---
+    n_false_alarms = n_est - len(matches)
+    false_alarm_rate_per_est = n_false_alarms / max(n_est, 1)
+
+    metrics = {
         "path_recall": recall,
         "path_precision": precision,
-        "power_recovery": recovered_power / max(total_power, np.finfo(float).eps),
+        "power_recovery": power_recovery,
         "delay_rmse_bins": delay_rmse,
         "doppler_rmse_bins": doppler_rmse,
+        "penalized_delay_rmse_bins": penalized_delay_rmse,
+        "penalized_doppler_rmse_bins": penalized_doppler_rmse,
+        "ospa_distance": ospa_val,
         "num_estimated": float(len(est.delay_bins)),
+        "num_missed": float(n_miss),
+        "num_false_alarms": float(n_false_alarms),
+        "false_alarm_rate": false_alarm_rate_per_est,
+    }
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# OSPA distance (joint localisation + cardinality error)
+# ---------------------------------------------------------------------------
+
+
+def _ospa_distance(
+    true_delay: np.ndarray,
+    true_doppler: np.ndarray,
+    est: EstimatedPaths,
+    delay_tolerance: float,
+    doppler_tolerance: float,
+    p: int = 2,
+    c: float = 1.0,
+) -> float:
+    """Compute OSPA distance between true and estimated path sets.
+
+    OSPA jointly penalises localisation error, missed detections, and false
+    alarms in a single metric.
+
+    Parameters
+    ----------
+    p : int
+        Order of the metric (default 2).
+    c : float
+        Cut-off distance in normalised DD units.  Errors beyond `c` are capped.
+        Default 1.0 means one tolerance-unit of error is the maximum per-path
+        contribution from localisation.
+
+    Implementation follows the standard OSPA definition:
+        d_OSPA = [ 1/max(m,n) * ( min_sum + c^p * |m-n| ) ]^(1/p)
+    where min_sum uses Hungarian assignment with distances capped at c,
+    and m, n are the cardinalities of the true and estimated sets.
+    """
+    n_true = len(true_delay)
+    n_est = len(est.delay_bins)
+
+    if n_true == 0 and n_est == 0:
+        return 0.0
+
+    # Normalise DD coordinates to comparable units using tolerances
+    norm_delay_true = true_delay / max(delay_tolerance, 1e-12)
+    norm_doppler_true = true_doppler / max(doppler_tolerance, 1e-12)
+    norm_delay_est = est.delay_bins / max(delay_tolerance, 1e-12)
+    norm_doppler_est = est.doppler_bins / max(doppler_tolerance, 1e-12)
+
+    true_points = np.stack([norm_delay_true, norm_doppler_true], axis=-1)
+    est_points = np.stack([norm_delay_est, norm_doppler_est], axis=-1)
+
+    if n_true == 0:
+        # All estimates are false alarms
+        return (c ** p * n_est) ** (1.0 / p)
+    if n_est == 0:
+        # All true paths are missed
+        return (c ** p * n_true) ** (1.0 / p)
+
+    # Pairwise distances, capped at c
+    dist = cdist(true_points, est_points, metric="euclidean")
+    dist = np.minimum(dist, c)
+
+    # Hungarian assignment on (n_true x n_est) matrix
+    row_ind, col_ind = linear_sum_assignment(dist)
+
+    # Sum over assigned pairs + cardinality penalty
+    loc_cost = float(np.sum(dist[row_ind, col_ind] ** p))
+    card_cost = c ** p * abs(n_true - n_est)
+    ospa = (1.0 / max(n_true, n_est) * (loc_cost + card_cost)) ** (1.0 / p)
+    return ospa
+
+
+# ---------------------------------------------------------------------------
+# Dictionary coherence (global + far-field)
+# ---------------------------------------------------------------------------
+
+
+def dictionary_coherence(
+    pilot_mask: np.ndarray,
+    grid: DDGrid,
+    nms_delay_radius: int = 2,
+    nms_doppler_radius: int = 2,
+) -> dict[str, float]:
+    """Compute mutual coherence of the DD dictionary for a given pilot mask.
+
+    Reports three quantities:
+    - mu_max:  global maximum coherence (may be near 1 for oversampled grids)
+    - mu_far:  maximum after excluding the local NMS neighbourhood around each
+               column (more diagnostic for Comb grating lobes)
+    - mu_p95, mu_p99:  upper percentiles of coherence distribution
+    """
+    A = build_dd_dictionary(pilot_mask, grid)
+    G = np.abs(A.conj().T @ A)
+    n_cols = G.shape[0]
+    # Zero out diagonal
+    G[np.arange(n_cols), np.arange(n_cols)] = 0.0
+
+    mu_max = float(np.max(G))
+    mu_mean = float(np.mean(G))
+
+    # --- far-field coherence: exclude local DD neighbourhood ---
+    # Map each column index back to its (delay_bin, doppler_bin) grid position
+    n_delay = grid.delay_bins.size
+    n_doppler = grid.doppler_bins.size
+    G_far = G.copy()
+    for i in range(n_cols):
+        i_delay, i_doppler = divmod(i, n_doppler)
+        for j in range(n_cols):
+            j_delay, j_doppler = divmod(j, n_doppler)
+            if (
+                abs(i_delay - j_delay) <= nms_delay_radius
+                and abs(i_doppler - j_doppler) <= nms_doppler_radius
+            ):
+                G_far[i, j] = 0.0
+    mu_far = float(np.max(G_far))
+
+    # Percentiles (over upper triangle for efficiency, but full is fine)
+    upper = G[np.triu_indices(n_cols, k=1)]
+    mu_p95 = float(np.percentile(upper, 95))
+    mu_p99 = float(np.percentile(upper, 99))
+
+    return {
+        "mu_max": mu_max,
+        "mu_far": mu_far,
+        "mu_mean": mu_mean,
+        "mu_p95": mu_p95,
+        "mu_p99": mu_p99,
+        "n_dictionary_columns": n_cols,
+        "gram_psr": 1.0 / max(mu_max, np.finfo(float).eps),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Pilot ambiguity function
+# ---------------------------------------------------------------------------
+
+
+def pilot_ambiguity_function(
+    pilot_mask: np.ndarray,
+    grid: DDGrid,
+) -> np.ndarray:
+    """Compute the normalised pilot ambiguity function |A(Δτ, Δν)|.
+
+    A(Δτ, Δν) = |Σ_{(n,m)∈P} exp(-j2π n Δτ / N) exp(j2π m Δν / M)|
+
+    Normalised so that A(0, 0) = 1.
+    """
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        raise ValueError("pilot mask contains no observations")
+    n_total, m_total = pilot_mask.shape
+
+    af = np.zeros((grid.delay_bins.size, grid.doppler_bins.size), dtype=np.float64)
+    for i, dtau in enumerate(grid.delay_bins):
+        for j, dnu in enumerate(grid.doppler_bins):
+            phase = (
+                -2j * np.pi * n_idx * dtau / n_total
+                + 2j * np.pi * m_idx * dnu / m_total
+            )
+            af[i, j] = float(np.abs(np.sum(np.exp(phase))))
+    # Normalise so zero-delay-zero-Doppler peak = 1
+    af /= max(float(np.max(af)), np.finfo(float).eps)
+    return af
+
+
+def ambiguity_metrics(
+    af: np.ndarray,
+    delay_radius: int = 2,
+    doppler_radius: int = 2,
+) -> dict[str, float]:
+    """Extract key metrics from a pilot ambiguity function.
+
+    The mainlobe exclusion region uses the same radius as NMS so the AF
+    sidelobe metrics correspond directly to the detector behaviour.
+
+    Returns
+    -------
+    pslr_db : float
+        Peak-to-maximum-sidelobe ratio (dB).  More negative = better.
+    islr_db : float
+        Integrated sidelobe ratio (dB).  More negative = better.
+    max_far_sidelobe_delay : float
+        Delay bin of the strongest far sidelobe.
+    max_far_sidelobe_doppler : float
+        Doppler bin of the strongest far sidelobe.
+    mainlobe_width_delay_bins : float
+        -3 dB mainlobe width in delay bins.
+    mainlobe_width_doppler_bins : float
+        -3 dB mainlobe width in Doppler bins.
+    """
+    peak_idx = np.unravel_index(np.argmax(af), af.shape)
+    di, dj = peak_idx
+
+    # Mainlobe: contiguous -3 dB region around the peak
+    mainlobe_mask = af >= float(np.max(af)) / np.sqrt(2.0)
+
+    # Sidelobe mask: exclude mainlobe AND local NMS neighbourhood
+    sidelobe_mask = ~mainlobe_mask
+    # Also zero out the NMS exclusion zone (same radius as the detector)
+    i0, i1 = max(0, di - delay_radius), min(af.shape[0], di + delay_radius + 1)
+    j0, j1 = max(0, dj - doppler_radius), min(af.shape[1], dj + doppler_radius + 1)
+    far_mask = sidelobe_mask.copy()
+    far_mask[i0:i1, j0:j1] = False
+
+    # PSLR: peak-to-max-sidelobe ratio (using far-field sidelobes only)
+    if np.any(far_mask):
+        max_far_sidelobe = float(np.max(af[far_mask]))
+        pslr_db = 20.0 * np.log10(max_far_sidelobe)  # normalised AF → peak = 1 = 0 dB
+    else:
+        max_far_sidelobe = 0.0
+        pslr_db = float("-inf")
+
+    # Far sidelobe location
+    if max_far_sidelobe > 0:
+        far_idx = np.unravel_index(np.argmax(af * far_mask.astype(np.float64)), af.shape)
+        max_far_delay = float(far_idx[0])
+        max_far_doppler = float(far_idx[1])
+    else:
+        max_far_delay = float("nan")
+        max_far_doppler = float("nan")
+
+    # ISLR
+    mainlobe_energy = float(np.sum(af[mainlobe_mask] ** 2))
+    sidelobe_energy = float(np.sum(af[sidelobe_mask] ** 2))
+    islr_db = (
+        10.0 * np.log10(sidelobe_energy / mainlobe_energy)
+        if mainlobe_energy > 0
+        else float("inf")
+    )
+
+    # Mainlobe widths
+    ml_indices = np.argwhere(mainlobe_mask)
+    if ml_indices.size > 0:
+        ml_width_delay = float(ml_indices[:, 0].max() - ml_indices[:, 0].min())
+        ml_width_doppler = float(ml_indices[:, 1].max() - ml_indices[:, 1].min())
+    else:
+        ml_width_delay = 0.0
+        ml_width_doppler = 0.0
+
+    return {
+        "pslr_db": pslr_db,
+        "islr_db": islr_db,
+        "max_far_sidelobe_delay_bin": max_far_delay,
+        "max_far_sidelobe_doppler_bin": max_far_doppler,
+        "mainlobe_width_delay_bins": ml_width_delay,
+        "mainlobe_width_doppler_bins": ml_width_doppler,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Confidence intervals and paired bootstrap
+# ---------------------------------------------------------------------------
+
+
+def confidence_interval(
+    values: np.ndarray,
+    alpha: float = 0.05,
+) -> dict[str, float]:
+    """Compute mean, standard error, and 95% confidence interval.
+
+    SE = s / sqrt(N_eff), where N_eff counts only finite (non-NaN) values.
+    This is critical for matched-path RMSE which can be NaN when no paths
+    are matched at low SNR.
+    """
+    finite = values[np.isfinite(values)]
+    n_eff = finite.size
+    if n_eff < 2:
+        return {
+            "mean": float(np.mean(values)) if finite.size > 0 else float("nan"),
+            "std": float("nan"),
+            "se": float("nan"),
+            "ci_lower": float("nan"),
+            "ci_upper": float("nan"),
+            "n_eff": int(n_eff),
+        }
+    mean = float(np.mean(finite))
+    std = float(np.std(finite, ddof=1))
+    se = std / np.sqrt(n_eff)
+    z = 1.96  # 95% CI
+    return {
+        "mean": mean,
+        "std": std,
+        "se": se,
+        "ci_lower": mean - z * se,
+        "ci_upper": mean + z * se,
+        "n_eff": int(n_eff),
+    }
+
+
+def paired_bootstrap_test(
+    values_a: np.ndarray,
+    values_b: np.ndarray,
+    n_bootstrap: int = 10000,
+    alpha: float = 0.05,
+) -> dict[str, float]:
+    """Paired bootstrap test for the difference A - B.
+
+    Returns the mean difference, its 95% CI, and the two-sided p-value.
+
+    REQUIRES paired data: for each trial index t, values_a[t] and values_b[t]
+    must share the same channel realisation and base noise.  This is ensured
+    by the Gate 0 RNG design (separate channel/pilot/noise RNGs; channel and
+    noise seeds do not include pattern_index).
+    """
+    finite_mask = np.isfinite(values_a) & np.isfinite(values_b)
+    a = values_a[finite_mask]
+    b = values_b[finite_mask]
+    if a.size < 10:
+        return {
+            "mean_diff": float("nan"),
+            "ci_lower": float("nan"),
+            "ci_upper": float("nan"),
+            "p_value": float("nan"),
+            "n_pairs": int(a.size),
+            "warning": "fewer than 10 finite pairs — CI unreliable",
+        }
+
+    diff = a - b
+    mean_diff = float(np.mean(diff))
+    rng = np.random.default_rng(42)
+    bootstrap_diffs = np.zeros(n_bootstrap)
+    for i in range(n_bootstrap):
+        idx = rng.choice(a.size, size=a.size, replace=True)
+        bootstrap_diffs[i] = float(np.mean(diff[idx]))
+
+    ci_lower = float(np.percentile(bootstrap_diffs, 100 * alpha / 2))
+    ci_upper = float(np.percentile(bootstrap_diffs, 100 * (1 - alpha / 2)))
+    # Two-sided p-value
+    if mean_diff >= 0:
+        p_value = 2.0 * float(np.mean(bootstrap_diffs <= 0))
+    else:
+        p_value = 2.0 * float(np.mean(bootstrap_diffs >= 0))
+    p_value = min(p_value, 1.0)
+
+    return {
+        "mean_diff": mean_diff,
+        "ci_lower": ci_lower,
+        "ci_upper": ci_upper,
+        "p_value": p_value,
+        "n_pairs": int(a.size),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Net spectral efficiency
+# ---------------------------------------------------------------------------
+
+
+def net_spectral_efficiency(
+    pilot_density: float,
+    snr_db: float,
+    channel_nmse: Optional[float] = None,
+) -> dict[str, float]:
+    """Compute net spectral efficiency accounting for pilot overhead.
+
+    R_net = (1 - ρ_p) * log2(1 + γ_eff)
+
+    where γ_eff = SNR / (1 + SNR * NMSE) when NMSE is available.
+
+    Returns both the raw rate and the fraction of ideal (ρ_p=0, perfect CSI).
+    """
+    rho_p = pilot_density
+    snr_linear = 10.0 ** (snr_db / 10.0)
+
+    if channel_nmse is not None and channel_nmse > 0:
+        gamma_eff = snr_linear / (1.0 + snr_linear * channel_nmse)
+    else:
+        gamma_eff = snr_linear
+
+    data_fraction = 1.0 - rho_p
+    r_net = data_fraction * np.log2(1.0 + gamma_eff)
+
+    # Ideal: ρ_p=0, perfect CSI → log2(1 + SNR)
+    r_ideal = np.log2(1.0 + snr_linear)
+
+    return {
+        "net_spectral_efficiency_bps_hz": float(r_net),
+        "data_resource_fraction": float(data_fraction),
+        "effective_snr_db": float(10.0 * np.log10(max(gamma_eff, 1e-12))),
+        "efficiency_ratio": float(r_net / max(r_ideal, 1e-12)),
     }
