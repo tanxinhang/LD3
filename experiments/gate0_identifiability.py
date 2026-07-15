@@ -380,10 +380,14 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 bootstrap_rows.append(bt)
 
     bootstrap_path = output_dir / "gate0_paired_bootstrap.csv"
-    with bootstrap_path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(bootstrap_rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(bootstrap_rows)
+    if bootstrap_rows:
+        with bootstrap_path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=list(bootstrap_rows[0].keys()))
+            writer.writeheader()
+            writer.writerows(bootstrap_rows)
+    else:
+        # Single pilot pattern — no paired comparison possible
+        bootstrap_path = None
 
     # ------------------------------------------------------------------
     # 6. Manifest with paired-design documentation
@@ -592,6 +596,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     print(f"  bootstrap_rows:    {len(bootstrap_rows)} rows")
     if bootstrap_rows:
         print(f"  bootstrap columns: {list(bootstrap_rows[0].keys())}")
+    else:
+        print(f"  bootstrap:         skipped (need ≥2 pilot patterns)")
     paired_ok = manifest.get("paired_design", {}).get("shared_channel_bank", False)
     print(f"  paired_design.shared_channel_bank = {paired_ok}")
     # --- PHYSICAL CLOSURE CHECK ---
