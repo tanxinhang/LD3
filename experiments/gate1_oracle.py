@@ -241,11 +241,15 @@ def train_model(
     weight_decay: float,
     is_cross: bool,
     val_loader: DataLoader | None = None,
+    model_type: str = "none",
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
     Returns (history, best_model_state_dict).  If val_loader is None, the
     final model state is returned as "best".
+
+    model_type: "none" | "legacy_cross" | "physical_residual"
+      - physical_residual adds a gate bias loss to encourage trusting H_phys
     """
     model.to(device)
     optimizer = torch.optim.AdamW(
@@ -283,10 +287,16 @@ def train_model(
                     pt = pt[perm]
                     pv = pv[perm]
 
-                output, _ = model(batch["tf_input"], pt, pv)
+                output, diagnostics = model(batch["tf_input"], pt, pv)
             else:
                 output = model(batch["tf_input"])
+                diagnostics = {}
             loss = nmse_loss(output, batch["target"])
+            # Gate bias: encourage trusting H_phys unless TF correction is needed.
+            # λ = 0.005 small enough to not dominate NMSE — just breaks symmetry.
+            if model_type == "physical_residual" and "gate_mean" in diagnostics:
+                gate_bias = 0.005 * ((1.0 - diagnostics["gate_mean"]) ** 2)
+                loss = loss + gate_bias
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at epoch {epoch}")
             loss.backward()
@@ -545,6 +555,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 weight_decay=float(training["weight_decay"]),
                 is_cross=uses_tokens,
                 val_loader=val_loader,
+                model_type=model_type,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)
