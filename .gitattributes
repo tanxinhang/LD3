@@ -1,0 +1,7 @@
+*.csv text diff=csv
+*.json text diff=json
+*.yaml text diff=yaml
+*.py text diff=python
+*.md text diff=markdown
+*.png binary
+*.pt binary
