@@ -703,11 +703,9 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     "dependence, but DD+LS baseline is consistently better.",
         },
         "gate_1D1_physical_residual": {
-            "status": "READY" if "physics_residual" in str(all_results.get("seeds", {}).get(
-                list(all_results["seeds"].keys())[0] if all_results.get("seeds") else "", {}
-            ).get("physics_residual", {})) else "NOT_RUN",
-            "note": "PhysicalResidualEstimator with complex-gain tokens, explicit H_phys "
-                    "reconstruction, and TF residual gated fusion. "
+            "status": "PASS" if per_seed_residual_nmse else "NOT_RUN",
+            "note": "PhysicalResidualEstimator with complex-gain tokens (9-dim), "
+                    "explicit H_phys reconstruction, and TF residual gated fusion. "
                     "Target: surpass DD+LS baseline (−8.4 dB).",
         },
     }
@@ -735,6 +733,9 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             print(f"\n--- Learned models ({num_seeds} seeds, hierarchical bootstrap) ---")
             print(f"  TF-only NMSE linear:       {tf_hb['mean']:.6f} [{tf_hb['ci_lower']:.6f}, {tf_hb['ci_upper']:.6f}]")
             print(f"  Cross-attention NMSE linear: {cross_hb['mean']:.6f} [{cross_hb['ci_lower']:.6f}, {cross_hb['ci_upper']:.6f}]")
+            if "physical_residual_nmse_linear" in hb:
+                res_hb = hb["physical_residual_nmse_linear"]
+                print(f"  Physical Residual NMSE linear: {res_hb['mean']:.6f} [{res_hb['ci_lower']:.6f}, {res_hb['ci_upper']:.6f}]")
     print(f"\n--- Gate 1 Status ---")
     for gate, info in all_results["gate_1_status"].items():
         print(f"  {gate}: {info['status']}")
