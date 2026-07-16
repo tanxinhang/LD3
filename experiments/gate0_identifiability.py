@@ -690,10 +690,22 @@ def main() -> None:
         help="Refine DD peak positions via local 2D quadratic interpolation "
              "(sub-grid correction for off-grid leakage)",
     )
+    parser.add_argument(
+        "--oversample-delay", type=int, default=None,
+        help="Override estimator.oversample_delay (for OS sweep without editing YAML)",
+    )
+    parser.add_argument(
+        "--oversample-doppler", type=int, default=None,
+        help="Override estimator.oversample_doppler (for OS sweep without editing YAML)",
+    )
     args = parser.parse_args()
     config = load_config(args.config)
     if args.trials is not None:
         config["trials"] = args.trials
+    if args.oversample_delay is not None:
+        config["estimator"]["oversample_delay"] = args.oversample_delay
+    if args.oversample_doppler is not None:
+        config["estimator"]["oversample_doppler"] = args.oversample_doppler
     if "ablation" not in config:
         config["ablation"] = {}
     if args.ablation_integer_bins:
