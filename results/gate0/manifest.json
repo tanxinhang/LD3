@@ -47,11 +47,11 @@
     },
     "ablation": {}
   },
-  "trial_csv": "D:\\Desktop\\OFDM\\LD3\\results\\gate0\\gate0_trials.csv",
-  "summary_csv": "D:\\Desktop\\OFDM\\LD3\\results\\gate0\\gate0_summary.csv",
-  "bootstrap_csv": "D:\\Desktop\\OFDM\\LD3\\results\\gate0\\gate0_paired_bootstrap.csv",
-  "coherence_csv": "D:\\Desktop\\OFDM\\LD3\\results\\gate0\\gate0_coherence.csv",
-  "ambiguity_csv": "D:\\Desktop\\OFDM\\LD3\\results\\gate0\\gate0_ambiguity.csv",
+  "trial_csv": "results\\gate0\\gate0_trials.csv",
+  "summary_csv": "results\\gate0\\gate0_summary.csv",
+  "bootstrap_csv": "results\\gate0\\gate0_paired_bootstrap.csv",
+  "coherence_csv": "results\\gate0\\gate0_coherence.csv",
+  "ambiguity_csv": "results\\gate0\\gate0_ambiguity.csv",
   "ablation": "none",
   "paired_design": {
     "shared_channel_bank": true,

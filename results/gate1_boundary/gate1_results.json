@@ -358,7 +358,7 @@
           "nmse_linear": 0.591907799243927,
           "nmse_db": -2.2774593830108643,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.8481188000005204,
+          "inference_seconds": 0.793617200004519,
           "samples": 1024
         },
         "evaluations": {
@@ -367,7 +367,7 @@
             "nmse_linear": 0.591907799243927,
             "nmse_db": -2.2774593830108643,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.8481188000005204,
+            "inference_seconds": 0.793617200004519,
             "samples": 1024
           }
         },
@@ -665,7 +665,7 @@
           "nmse_linear": 0.41954222321510315,
           "nmse_db": -3.7722432613372803,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.2868185999977868,
+          "inference_seconds": 0.4076016000035452,
           "samples": 1024,
           "mean_null_attention": 0.4404838979244232,
           "mean_gate": 0.7108510136604309
@@ -676,7 +676,7 @@
             "nmse_linear": 0.41954222321510315,
             "nmse_db": -3.7722432613372803,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.2868185999977868,
+            "inference_seconds": 0.4076016000035452,
             "samples": 1024,
             "mean_null_attention": 0.4404838979244232,
             "mean_gate": 0.7108510136604309
@@ -686,7 +686,7 @@
             "nmse_linear": 0.7395054697990417,
             "nmse_db": -1.3105859756469727,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.2862996999901952,
+            "inference_seconds": 0.3874089000019012,
             "samples": 1024,
             "mean_null_attention": 0.4404314160346985,
             "mean_gate": 0.7108510136604309
@@ -696,7 +696,7 @@
             "nmse_linear": 0.6699499487876892,
             "nmse_db": -1.7395764589309692,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.29540769998857286,
+            "inference_seconds": 0.39169390000461135,
             "samples": 1024,
             "mean_null_attention": 1.0,
             "mean_gate": 0.6842148900032043
@@ -999,7 +999,7 @@
           "nmse_linear": 0.5914735794067383,
           "nmse_db": -2.280646562576294,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.7392994999972871,
+          "inference_seconds": 0.7672865999920759,
           "samples": 1024
         },
         "evaluations": {
@@ -1008,7 +1008,7 @@
             "nmse_linear": 0.5914735794067383,
             "nmse_db": -2.280646562576294,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.7392994999972871,
+            "inference_seconds": 0.7672865999920759,
             "samples": 1024
           }
         },
@@ -1304,7 +1304,7 @@
           "nmse_linear": 0.41797348856925964,
           "nmse_db": -3.788512706756592,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.31636459998844657,
+          "inference_seconds": 0.2954585999978008,
           "samples": 1024,
           "mean_null_attention": 0.4446784555912018,
           "mean_gate": 0.7251473665237427
@@ -1315,7 +1315,7 @@
             "nmse_linear": 0.41797348856925964,
             "nmse_db": -3.788512706756592,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.31636459998844657,
+            "inference_seconds": 0.2954585999978008,
             "samples": 1024,
             "mean_null_attention": 0.4446784555912018,
             "mean_gate": 0.7251473665237427
@@ -1325,7 +1325,7 @@
             "nmse_linear": 0.7275021076202393,
             "nmse_db": -1.381657361984253,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.2925812000030419,
+            "inference_seconds": 0.30790960000013,
             "samples": 1024,
             "mean_null_attention": 0.4448470175266266,
             "mean_gate": 0.7251473665237427
@@ -1335,7 +1335,7 @@
             "nmse_linear": 0.6764393448829651,
             "nmse_db": -1.6977113485336304,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.30293259999598376,
+            "inference_seconds": 0.2845367999980226,
             "samples": 1024,
             "mean_null_attention": 1.0,
             "mean_gate": 0.6796864867210388
@@ -1635,7 +1635,7 @@
           "nmse_linear": 0.5915384292602539,
           "nmse_db": -2.280170440673828,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.7532369999971706,
+          "inference_seconds": 0.7508249999955297,
           "samples": 1024
         },
         "evaluations": {
@@ -1644,7 +1644,7 @@
             "nmse_linear": 0.5915384292602539,
             "nmse_db": -2.280170440673828,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.7532369999971706,
+            "inference_seconds": 0.7508249999955297,
             "samples": 1024
           }
         },
@@ -1944,7 +1944,7 @@
           "nmse_linear": 0.41922658681869507,
           "nmse_db": -3.7755117416381836,
           "initial_nmse_db": 0.7552257180213928,
-          "inference_seconds": 0.29299750000063796,
+          "inference_seconds": 0.3094337000075029,
           "samples": 1024,
           "mean_null_attention": 0.4576098918914795,
           "mean_gate": 0.6913341879844666
@@ -1955,7 +1955,7 @@
             "nmse_linear": 0.41922658681869507,
             "nmse_db": -3.7755117416381836,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.29299750000063796,
+            "inference_seconds": 0.3094337000075029,
             "samples": 1024,
             "mean_null_attention": 0.4576098918914795,
             "mean_gate": 0.6913341879844666
@@ -1965,7 +1965,7 @@
             "nmse_linear": 0.7406065464019775,
             "nmse_db": -1.3041245937347412,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.2962832999910461,
+            "inference_seconds": 0.32289090000267606,
             "samples": 1024,
             "mean_null_attention": 0.456757128238678,
             "mean_gate": 0.6913341879844666
@@ -1975,7 +1975,7 @@
             "nmse_linear": 0.6833807229995728,
             "nmse_db": -1.6533727645874023,
             "initial_nmse_db": 0.7552257180213928,
-            "inference_seconds": 0.3145721000037156,
+            "inference_seconds": 0.3254294999933336,
             "samples": 1024,
             "mean_null_attention": 1.0,
             "mean_gate": 0.6424903869628906

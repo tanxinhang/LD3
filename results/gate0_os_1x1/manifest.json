@@ -32,8 +32,8 @@
       ]
     },
     "estimator": {
-      "oversample_delay": 2,
-      "oversample_doppler": 4,
+      "oversample_delay": 1,
+      "oversample_doppler": 1,
       "delay_tolerance_bins": 0.75,
       "doppler_tolerance_bins": 0.5,
       "nms_delay_radius": 2,
@@ -68,8 +68,8 @@
     "normalization": "delay/doppler divided by respective tolerances"
   },
   "dictionary_coherence": {
-    "nms_delay_radius": 4,
-    "nms_doppler_radius": 8,
+    "nms_delay_radius": 2,
+    "nms_doppler_radius": 2,
     "mu_far_excludes": "local NMS neighbourhood around each column"
   },
   "oracle_nmse_naming": {
