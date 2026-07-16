@@ -300,6 +300,170 @@ def refine_paths_quadratic(
     )
 
 
+def refine_paths_variable_projection(
+    est: EstimatedPaths,
+    pilot_observations: np.ndarray,
+    pilot_mask: np.ndarray,
+    num_subcarriers: int,
+    num_symbols: int,
+    n_rounds: int = 3,
+    n_probes: int = 8,
+    step_delay: float = 0.1,
+    step_doppler: float = 0.1,
+    ridge_relative: float = 1e-6,
+) -> tuple[EstimatedPaths, dict]:
+    """Refine DD path estimates via bounded random-probe variable projection.
+
+    For each path, tries small random (τ, ν) perturbations, re-estimates
+    gains via LS, and accepts if pilot residual decreases.  Runs multiple
+    rounds of coordinate descent over all paths.
+
+    This is simpler and more robust than gradient descent — no gradients of
+    the dictionary w.r.t. τ/ν are needed, and monotonicity is guaranteed by
+    the acceptance gate.
+
+    Returns (refined_paths, diagnostics).
+    """
+    n_paths = len(est.delay_bins)
+    if n_paths == 0:
+        return est, {"accepted": 0, "rounds": 0}
+
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        return est, {"accepted": 0, "rounds": 0}
+
+    y = pilot_observations[pilot_mask].copy()
+    N = num_subcarriers
+    M = num_symbols
+
+    # Current best positions and gains
+    d_bins = est.delay_bins.copy()
+    f_bins = est.doppler_bins.copy()
+
+    # Pilot residual for current positions
+    def _compute_residual(d, f):
+        A = np.zeros((n_idx.size, len(d)), dtype=np.complex128)
+        for l in range(len(d)):
+            dph = np.exp(-2j * np.pi * n_idx * d[l] / N)
+            fph = np.exp(2j * np.pi * m_idx * f[l] / M)
+            A[:, l] = dph * fph
+            # Normalise column (consistent LS regularisation)
+            col_norm = np.sqrt(np.sum(np.abs(A[:, l]) ** 2))
+            if col_norm > np.finfo(float).eps:
+                A[:, l] /= col_norm
+
+        # Ridge LS
+        gram = np.zeros((len(d), len(d)), dtype=np.complex128)
+        rhs = np.zeros(len(d), dtype=np.complex128)
+        for i in range(len(d)):
+            s_rhs = 0.0 + 0.0j
+            for k in range(n_idx.size):
+                s_rhs += A[k, i].conjugate() * y[k]
+            rhs[i] = s_rhs
+            for j in range(i, len(d)):
+                s = 0.0 + 0.0j
+                for k in range(n_idx.size):
+                    s += A[k, i].conjugate() * A[k, j]
+                gram[i, j] = s
+                if i != j:
+                    gram[j, i] = s.conjugate()
+
+        trace_gram = sum(float(gram[i, i].real) for i in range(len(d)))
+        ridge = ridge_relative * trace_gram / max(len(d), 1)
+        for i in range(len(d)):
+            gram[i, i] += ridge
+
+        # Solve real system (manual Cholesky — MKL-safe)
+        dim = 2 * len(d)
+        G_real = np.zeros((dim, dim))
+        rhs_real = np.zeros(dim)
+        for i in range(len(d)):
+            rhs_real[i] = float(rhs[i].real)
+            rhs_real[i + len(d)] = float(rhs[i].imag)
+            for j in range(len(d)):
+                g_re = float(gram[i, j].real)
+                g_im = float(gram[i, j].imag)
+                G_real[i, j] = g_re
+                G_real[i, j + len(d)] = -g_im
+                G_real[i + len(d), j] = g_im
+                G_real[i + len(d), j + len(d)] = g_re
+
+        g = _solve_spd_cholesky(G_real, rhs_real)
+        g_complex = g[:len(d)] + 1j * g[len(d):]
+
+        # Compute residual ||y - A g||²
+        resid = 0.0
+        for k in range(n_idx.size):
+            pred = 0.0 + 0.0j
+            for l in range(len(d)):
+                pred += A[k, l] * g_complex[l]
+            diff = y[k] - pred
+            resid += float(diff.real ** 2 + diff.imag ** 2)
+        return resid, A, g_complex
+
+    # Initial residual
+    resid_old, _, _ = _compute_residual(d_bins, f_bins)
+    rng = np.random.default_rng(42)
+    total_accepted = 0
+
+    for round_idx in range(n_rounds):
+        # Scale step down each round
+        step_d = step_delay / (1.0 + round_idx)
+        step_f = step_doppler / (1.0 + round_idx)
+
+        for l in range(n_paths):
+            best_d = d_bins[l]
+            best_f = f_bins[l]
+            best_resid = resid_old
+            accepted_this = False
+
+            # Try N probes in random directions
+            for _ in range(n_probes):
+                d_probe = d_bins[l] + step_d * (rng.uniform(-1, 1))
+                f_probe = f_bins[l] + step_f * (rng.uniform(-1, 1))
+                # Clamp to physical range
+                d_probe = max(0.0, d_probe)
+                f_probe = max(-3.0, min(3.0, f_probe))
+
+                d_trial = d_bins.copy()
+                f_trial = f_bins.copy()
+                d_trial[l] = d_probe
+                f_trial[l] = f_probe
+
+                resid_new, _, _ = _compute_residual(d_trial, f_trial)
+                if resid_new < best_resid:
+                    best_resid = resid_new
+                    best_d = d_probe
+                    best_f = f_probe
+                    accepted_this = True
+
+            if accepted_this:
+                d_bins[l] = best_d
+                f_bins[l] = best_f
+                resid_old = best_resid
+                total_accepted += 1
+
+            # After each path update, re-estimate gains jointly
+            if accepted_this:
+                resid_old, _, _ = _compute_residual(d_bins, f_bins)
+
+    # Don't rebuild full dict again; just return refined positions.
+    # Gains will be re-estimated by the caller (estimated_support_ls_reconstruction).
+    refined = EstimatedPaths(
+        delay_bins=d_bins,
+        doppler_bins=f_bins,
+        scores=est.scores.copy(),
+        gains=est.gains.copy(),  # stale — caller must re-estimate
+    )
+
+    diag = {
+        "accepted": total_accepted,
+        "rounds": n_rounds,
+        "resid_initial": float(resid_old),  # updated to final after all rounds
+    }
+    return refined, diag
+
+
 def detect_paths_oracle_nms(
     score_map: np.ndarray,
     gain_map: np.ndarray,

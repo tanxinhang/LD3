@@ -49,6 +49,7 @@ from ld3.dd_estimation import (
     paired_bootstrap_test,
     pilot_ambiguity_function,
     refine_paths_quadratic,
+    refine_paths_variable_projection,
 )
 from ld3.metrics import nmse_numpy
 from ld3.oracle import (
@@ -178,6 +179,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     use_integer_bins = bool(ablation.get("integer_bins", False))
     use_oracle_nms = bool(ablation.get("oracle_nms", False))
     use_refine = bool(ablation.get("refine", False))
+    use_vp = bool(ablation.get("vp", False))
 
     trial_rows: list[dict[str, Any]] = []
 
@@ -251,7 +253,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
                     # --- ablation: sub-grid quadratic refinement ---
                     if use_refine and len(estimated.delay_bins) > 0:
-                        # Compute pilot residual BEFORE refinement
                         H_est_ls_old = estimated_support_ls_reconstruction(
                             ofdm, est=estimated,
                             pilot_observations=observed, pilot_mask=mask,
@@ -260,12 +261,10 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                             observed[mask] - H_est_ls_old[mask]
                         ) ** 2))
 
-                        # Refine positions
                         estimated_refined = refine_paths_quadratic(
                             estimated, score_map, grid
                         )
 
-                        # Compute pilot residual AFTER refinement
                         H_est_ls_new = estimated_support_ls_reconstruction(
                             ofdm, est=estimated_refined,
                             pilot_observations=observed, pilot_mask=mask,
@@ -274,10 +273,19 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                             observed[mask] - H_est_ls_new[mask]
                         ) ** 2))
 
-                        # Accept refinement ONLY if pilot residual decreases
                         if resid_new < resid_old:
                             estimated = estimated_refined
-                        # else: keep original grid positions
+
+                    # --- ablation: variable projection continuous refinement ---
+                    if use_vp and len(estimated.delay_bins) > 0:
+                        estimated_vp, vp_diag = refine_paths_variable_projection(
+                            estimated,
+                            pilot_observations=observed,
+                            pilot_mask=mask,
+                            num_subcarriers=ofdm.num_subcarriers,
+                            num_symbols=ofdm.num_symbols,
+                        )
+                        estimated = estimated_vp
 
                     metrics = identifiability_metrics(
                         paths.delay_bins,
@@ -435,6 +443,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         ablation_tag += "_oracle_nms"
     if use_refine:
         ablation_tag += "_refine"
+    if use_vp:
+        ablation_tag += "_vp"
 
     manifest = {
         "config": config,
@@ -691,6 +701,11 @@ def main() -> None:
              "(sub-grid correction for off-grid leakage)",
     )
     parser.add_argument(
+        "--ablation-vp", action="store_true",
+        help="Refine DD peaks via variable projection (pilot-residual-minimising "
+             "continuous parameter optimisation)",
+    )
+    parser.add_argument(
         "--oversample-delay", type=int, default=None,
         help="Override estimator.oversample_delay (for OS sweep without editing YAML)",
     )
@@ -714,6 +729,8 @@ def main() -> None:
         config["ablation"]["oracle_nms"] = True
     if args.ablation_refine:
         config["ablation"]["refine"] = True
+    if args.ablation_vp:
+        config["ablation"]["vp"] = True
     run(config, args.output_dir)
 
 
