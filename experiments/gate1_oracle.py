@@ -205,8 +205,10 @@ def evaluate(
                 output, diagnostics = model(
                     batch["tf_input"], path_tokens, path_valid
                 )
-                null_values.append(diagnostics["null_attention"].mean().cpu())
-                gate_values.append(diagnostics["gate"].mean().cpu())
+                if "null_attention" in diagnostics:
+                    null_values.append(diagnostics["null_attention"].mean().cpu())
+                if "gate" in diagnostics:
+                    gate_values.append(diagnostics["gate"].mean().cpu())
             else:
                 output = model(batch["tf_input"])
             nmse_values.append(nmse_torch(output, batch["target"]).cpu())
