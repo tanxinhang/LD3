@@ -44,7 +44,11 @@ from ld3.dd_estimation import (
     masked_matched_filter_map,
 )
 from ld3.metrics import nmse_loss, nmse_numpy, nmse_torch
-from ld3.models import PhysicsGuidedCrossAttention, TFOnlyEstimator
+from ld3.models import (
+    PhysicalResidualEstimator,
+    PhysicsGuidedCrossAttention,
+    TFOnlyEstimator,
+)
 from ld3.oracle import (
     estimated_support_ls_reconstruction,
     oracle_perfect_reconstruction,
@@ -457,6 +461,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     # --- Per-seed learned model records (for hierarchical bootstrap) ---
     per_seed_tf_nmse: list[np.ndarray] = []
     per_seed_cross_nmse: list[np.ndarray] = []
+    per_seed_residual_nmse: list[np.ndarray] = []
     per_seed_cross_shuffled_nmse: list[np.ndarray] = []
     per_seed_cross_null_nmse: list[np.ndarray] = []
 
@@ -496,21 +501,33 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             shuffle=False, num_workers=0,
         )
 
-        models: dict[str, tuple[torch.nn.Module, bool]] = {
-            "tf_only": (TFOnlyEstimator(hidden_dim), False),
+        token_dim_in = int(data_cfg.get("token_version", 1) + 6)  # 1→7, 2→9
+        models: dict[str, tuple[torch.nn.Module, str]] = {
+            "tf_only": (TFOnlyEstimator(hidden_dim), "none"),
             "physics_cross_attention": (
                 PhysicsGuidedCrossAttention(
                     hidden_dim=hidden_dim,
                     token_dim=hidden_dim,
+                    token_dim_in=token_dim_in,
                     max_delay_bins=channel.max_delay_bins,
                     max_abs_doppler_bins=channel.max_abs_doppler_bins,
                 ),
-                True,
+                "legacy_cross",
+            ),
+            "physics_residual": (
+                PhysicalResidualEstimator(
+                    hidden_dim=hidden_dim,
+                    num_subcarriers=ofdm.num_subcarriers,
+                    num_symbols=ofdm.num_symbols,
+                ),
+                "physical_residual",
             ),
         }
 
         seed_results: dict[str, Any] = {}
-        for name, (model, is_cross) in models.items():
+        for name, (model, model_type) in models.items():
+            uses_tokens = model_type in ("legacy_cross", "physical_residual")
+            is_physical = model_type == "physical_residual"
             print(f"\nTraining {name} on {device}")
             history, best_state = train_model(
                 model,
@@ -519,7 +536,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 epochs=int(training["epochs"]),
                 learning_rate=float(training["learning_rate"]),
                 weight_decay=float(training["weight_decay"]),
-                is_cross=is_cross,
+                is_cross=uses_tokens,
                 val_loader=val_loader,
             )
             # Load best-validation checkpoint before final evaluation
@@ -530,7 +547,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             )
             print(f"  Loaded best checkpoint (epoch={int(best_epoch)})")
 
-            metrics = evaluate(model, test_loader, device, is_cross, token_mode="oracle")
+            metrics = evaluate(model, test_loader, device, uses_tokens, token_mode="oracle")
             evaluations = {"oracle": metrics}
 
             # Collect per-sample NMSE for hierarchical bootstrap
@@ -539,7 +556,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             with torch.no_grad():
                 for batch in test_loader:
                     batch = move_batch(batch, device)
-                    if is_cross:
+                    if uses_tokens:
                         output, _ = model(
                             batch["tf_input"], batch["path_tokens"], batch["path_valid"]
                         )
@@ -549,12 +566,12 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     sample_nmse.extend(per_sample.tolist())
             sample_nmse_arr = np.array(sample_nmse, dtype=np.float64)
 
-            if is_cross:
+            if uses_tokens:
                 eval_shuffled = evaluate(
-                    model, test_loader, device, is_cross, token_mode="shuffled"
+                    model, test_loader, device, uses_tokens, token_mode="shuffled"
                 )
                 eval_null = evaluate(
-                    model, test_loader, device, is_cross, token_mode="null"
+                    model, test_loader, device, uses_tokens, token_mode="null"
                 )
                 evaluations["shuffled"] = eval_shuffled
                 evaluations["null"] = eval_null
@@ -587,10 +604,12 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 per_seed_cross_shuffled_nmse.append(np.array(shuffled_nmse))
                 per_seed_cross_null_nmse.append(np.array(null_nmse))
 
-            if name == "tf_only":
+            if model_type == "none":
                 per_seed_tf_nmse.append(sample_nmse_arr)
-            else:
+            elif model_type == "legacy_cross":
                 per_seed_cross_nmse.append(sample_nmse_arr)
+            elif model_type == "physical_residual":
+                per_seed_residual_nmse.append(sample_nmse_arr)
 
             seed_results[name] = {
                 "history": history,
@@ -616,21 +635,28 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     # --- Hierarchical bootstrap across seeds (paired resampling) ---
     if num_seeds > 1 and per_seed_tf_nmse and per_seed_cross_nmse:
-        all_results["hierarchical_bootstrap"] = {
+        hb = {
             "tf_only_nmse_linear": hierarchical_bootstrap_seeds(per_seed_tf_nmse),
             "cross_attention_nmse_linear": hierarchical_bootstrap_seeds(per_seed_cross_nmse),
-            # PAIRED comparison: Cross-attention minus TF-only
             "cross_vs_tf_only_paired_gain_linear": paired_bootstrap_gain(
                 per_seed_tf_nmse, per_seed_cross_nmse,
             ),
         }
+        if per_seed_residual_nmse:
+            hb["physical_residual_nmse_linear"] = hierarchical_bootstrap_seeds(
+                per_seed_residual_nmse
+            )
+            hb["residual_vs_tf_only_paired_gain_linear"] = paired_bootstrap_gain(
+                per_seed_tf_nmse, per_seed_residual_nmse,
+            )
         if per_seed_cross_shuffled_nmse:
-            all_results["hierarchical_bootstrap"]["cross_attention_shuffled_nmse_linear"] = (
+            hb["cross_attention_shuffled_nmse_linear"] = (
                 hierarchical_bootstrap_seeds(per_seed_cross_shuffled_nmse)
             )
-            all_results["hierarchical_bootstrap"]["cross_attention_null_nmse_linear"] = (
+            hb["cross_attention_null_nmse_linear"] = (
                 hierarchical_bootstrap_seeds(per_seed_cross_null_nmse)
             )
+        all_results["hierarchical_bootstrap"] = hb
 
     # --- Gate 1 status matrix ---
     nmse_perfect = non_learned_test["nmse_oracle_perfect"]["nmse_db"]
@@ -661,11 +687,21 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             "note": "DD-estimated support + LS vs Oracle support + LS. "
                     "Δ_support measures the cost of using DD-estimated (not true) locations.",
         },
-        "gate_1D_learned_fusion_value": {
-            "status": "NOT_YET_REPAIRED",
-            "note": "Current cross-attention uses 7-dim tokens without complex gain. "
-                    "Next revision must add (Re α, Im α) to tokens and implement "
-                    "explicit physical reconstruction + TF residual gated fusion.",
+        "gate_1D0_legacy_cross_attention": {
+            "status": "PRELIM_PASS" if any(
+                s["oracle_cross_attention_gain_db"] > 0.5
+                for s in all_results["seeds"].values()
+            ) else "FAIL",
+            "note": "Legacy softmax cross-attention. Token-use audit confirms DD prior "
+                    "dependence, but DD+LS baseline is consistently better.",
+        },
+        "gate_1D1_physical_residual": {
+            "status": "READY" if "physics_residual" in str(all_results.get("seeds", {}).get(
+                list(all_results["seeds"].keys())[0] if all_results.get("seeds") else "", {}
+            ).get("physics_residual", {})) else "NOT_RUN",
+            "note": "PhysicalResidualEstimator with complex-gain tokens, explicit H_phys "
+                    "reconstruction, and TF residual gated fusion. "
+                    "Target: surpass DD+LS baseline (−8.4 dB).",
         },
     }
 

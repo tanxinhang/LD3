@@ -8,7 +8,7 @@ from torch.utils.data import Dataset
 from .channel import generate_path_set, synthesize_tf_channel
 from .config import ChannelConfig, OFDMConfig
 from .interpolation import nearest_smooth_interpolation
-from .oracle import oracle_path_tokens
+from .oracle import oracle_path_tokens, oracle_path_tokens_v2
 from .pilots import generate_noise_grid, make_pilot_mask, observe_pilots
 
 
@@ -22,6 +22,7 @@ class DatasetConfig:
     max_paths: int = 8
     seed: int = 2036
     cache_in_memory: bool = True
+    token_version: int = 1  # 1 = legacy 7-dim, 2 = 9-dim with Re(α), Im(α)
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -67,6 +68,8 @@ class SyntheticOFDMISACDataset(Dataset):
         )
         initial = nearest_smooth_interpolation(observed, mask)
         tokens, valid = oracle_path_tokens(paths, self.cfg.max_paths)
+        if self.cfg.token_version >= 2:
+            tokens, valid = oracle_path_tokens_v2(paths, self.cfg.max_paths)
 
         tf_input = np.stack([initial.real, initial.imag, mask.astype(np.float64)], axis=0)
         target = np.stack([truth.real, truth.imag], axis=0)

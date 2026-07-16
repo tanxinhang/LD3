@@ -34,7 +34,7 @@ class PhysicsGuidedCrossAttention(nn.Module):
     Inputs
     ------
     tf_input: [B, 3, N, M] with real LS, imag LS, and pilot mask.
-    path_tokens: [B, L, 7] fields documented in oracle.oracle_path_tokens.
+    path_tokens: [B, L, D] where D is token_dim_in (7 for legacy, 9 for v2).
     path_valid: [B, L] boolean.
     """
 
@@ -42,6 +42,7 @@ class PhysicsGuidedCrossAttention(nn.Module):
         self,
         hidden_dim: int = 32,
         token_dim: int = 32,
+        token_dim_in: int = 7,
         max_delay_bins: float = 12.0,
         max_abs_doppler_bins: float = 3.0,
     ) -> None:
@@ -52,7 +53,7 @@ class PhysicsGuidedCrossAttention(nn.Module):
         self.tf_encoder = TFEncoder(hidden_dim)
         self.query = nn.Linear(hidden_dim, token_dim, bias=False)
         self.token_encoder = nn.Sequential(
-            nn.Linear(7, token_dim),
+            nn.Linear(token_dim_in, token_dim),
             nn.GELU(),
             nn.Linear(token_dim, token_dim),
         )
@@ -166,3 +167,145 @@ class TFOnlyEstimator(nn.Module):
 
     def forward(self, tf_input: torch.Tensor) -> torch.Tensor:
         return tf_input[:, :2] + self.head(self.encoder(tf_input))
+
+
+# ---------------------------------------------------------------------------
+# Gate 1-D1: Physical reconstruction + TF residual gated fusion
+# ---------------------------------------------------------------------------
+
+
+class PhysicalReconstructor(nn.Module):
+    """Differentiable OFDM phase-law synthesis from DD path parameters.
+
+    Given path tokens [τ, ν, Re(α), Im(α), ...], synthesises:
+      H_phys[n,m] = Σ_l α_l · exp(−j2π·n·τ_l/N + j2π·m·ν_l/M)
+
+    This is a hard-coded physics layer — no learned parameters.
+    The model receives the exact complex superposition, avoiding the need
+    to re-learn the OFDM phase law through softmax attention.
+    """
+
+    def __init__(
+        self,
+        num_subcarriers: int = 64,
+        num_symbols: int = 14,
+    ) -> None:
+        super().__init__()
+        n = torch.arange(num_subcarriers, dtype=torch.float32)
+        m = torch.arange(num_symbols, dtype=torch.float32)
+        self.register_buffer("n_grid", n[:, None])  # [N,1]
+        self.register_buffer("m_grid", m[None, :])  # [1,M]
+        self.N = num_subcarriers
+        self.M = num_symbols
+
+    def forward(
+        self,
+        tokens: torch.Tensor,       # [B, L, 9] — must have τ at [:,0], ν at [:,1], Re(α) at [:,7], Im(α) at [:,8]
+        valid: torch.Tensor,        # [B, L]
+    ) -> torch.Tensor:
+        """Returns H_phys: [B, 2, N, M] (real, imag)."""
+        batch, L, _ = tokens.shape
+        device = tokens.device
+
+        tau = tokens[:, :, 0]    # [B, L]
+        nu = tokens[:, :, 1]     # [B, L]
+        alpha_re = tokens[:, :, 7]  # [B, L]
+        alpha_im = tokens[:, :, 8]  # [B, L]
+        valid_f = valid.to(torch.float32)
+
+        # Phase: -2π·n·τ/N + 2π·m·ν/M
+        phase = (
+            -2.0 * torch.pi * self.n_grid[None, :, :, None] * tau[:, None, None, :] / self.N
+            + 2.0 * torch.pi * self.m_grid[None, None, :, None] * nu[:, None, None, :] / self.M
+        )  # [B, N, M, L]
+
+        cos_phase = torch.cos(phase)
+        sin_phase = torch.sin(phase)
+
+        # Complex multiplication: α · exp(j·phase)
+        # Re(H) = Σ [Re(α)·cos - Im(α)·sin] · valid
+        # Im(H) = Σ [Re(α)·sin + Im(α)·cos] · valid
+        h_real = torch.sum(
+            (alpha_re[:, None, None, :] * cos_phase
+             - alpha_im[:, None, None, :] * sin_phase) * valid_f[:, None, None, :],
+            dim=-1,
+        )  # [B, N, M]
+        h_imag = torch.sum(
+            (alpha_re[:, None, None, :] * sin_phase
+             + alpha_im[:, None, None, :] * cos_phase) * valid_f[:, None, None, :],
+            dim=-1,
+        )  # [B, N, M]
+
+        return torch.stack([h_real, h_imag], dim=1)  # [B, 2, N, M]
+
+
+class PhysicalResidualEstimator(nn.Module):
+    """TF–DD gated residual estimator — Gate 1-D1 target architecture.
+
+    H_phys = PhysicalReconstructor(path_tokens)     ← explicit physics
+    H_tf   = TFEncoder(tf_input)                     ← learned TF refinement
+    Ĥ = g ⊙ H_phys + (1−g) ⊙ H_tf + ΔH              ← gated fusion
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int = 48,
+        num_subcarriers: int = 64,
+        num_symbols: int = 14,
+    ) -> None:
+        super().__init__()
+        self.tf_encoder = TFEncoder(hidden_dim)
+        self.physics = PhysicalReconstructor(num_subcarriers, num_symbols)
+
+        # TF refinement head
+        self.tf_head = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, 2, 1),
+        )
+
+        # Fusion gate: learns where to trust physics vs TF
+        self.gate = nn.Sequential(
+            nn.Conv2d(hidden_dim + 4, hidden_dim // 2, 1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim // 2, 1, 1),
+            nn.Sigmoid(),
+        )
+
+        # Residual correction
+        self.residual = nn.Sequential(
+            nn.Conv2d(hidden_dim + 2, hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, 2, 1),
+        )
+
+    def forward(
+        self,
+        tf_input: torch.Tensor,      # [B, 3, N, M]  real-LS, imag-LS, mask
+        path_tokens: torch.Tensor,   # [B, L, 9]  with Re(α), Im(α)
+        path_valid: torch.Tensor,    # [B, L]
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        batch, _, N, M = tf_input.shape
+
+        # 1. TF encoding
+        tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
+        H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
+
+        # 2. Explicit physical reconstruction
+        H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
+
+        # 3. Gated fusion
+        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)  # [B, H+4, N, M]
+        g = self.gate(gate_input)                          # [B, 1, N, M]
+        H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
+
+        # 4. Residual correction
+        residual_input = torch.cat([tf_features, H_fused], dim=1)
+        delta = self.residual(residual_input)              # [B, 2, N, M]
+        H_out = H_fused + delta
+
+        diagnostics = {
+            "gate_mean": g.mean(),
+            "gate": g,
+        }
+        return H_out, diagnostics

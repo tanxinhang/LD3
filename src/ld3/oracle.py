@@ -17,12 +17,11 @@ from .dd_estimation import EstimatedPaths
 def oracle_path_tokens(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.ndarray]:
     """Create fixed-width path tokens and a validity mask.
 
-    Token fields: delay_bin, doppler_bin, normalized power, confidence,
-    sigma_delay, sigma_doppler, communication relevance.
+    Token fields (legacy 7-dim, no complex gain):
+      delay_bin, doppler_bin, normalized power, confidence,
+      sigma_delay, sigma_doppler, communication relevance.
 
-    NOTE: this 7-dim token does NOT include complex gain (Re α, Im α).
-    The model fix adding complex-gain tokens is planned for the next revision
-    (Gate 1-D: learned fusion value).
+    For Gate 1-D1, use oracle_path_tokens_v2 which includes Re(α), Im(α).
     """
 
     tokens = np.zeros((max_paths, 7), dtype=np.float32)
@@ -36,6 +35,38 @@ def oracle_path_tokens(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.n
     tokens[:count, 4] = 0.0
     tokens[:count, 5] = 0.0
     tokens[:count, 6] = 1.0
+    valid[:count] = True
+    return tokens, valid
+
+
+def oracle_path_tokens_v2(paths: PathSet, max_paths: int) -> tuple[np.ndarray, np.ndarray]:
+    """Create 9-dim path tokens WITH complex gain — Gate 1-D1.
+
+    Token fields (9-dim):
+      0: delay_bin
+      1: doppler_bin
+      2: normalized power |α|²
+      3: confidence
+      4: sigma_delay
+      5: sigma_doppler
+      6: communication relevance
+      7: Re(α)    ← NEW
+      8: Im(α)    ← NEW
+    """
+
+    tokens = np.zeros((max_paths, 9), dtype=np.float32)
+    valid = np.zeros(max_paths, dtype=bool)
+    count = min(max_paths, len(paths.gains))
+    order = np.argsort(paths.power)[::-1][:count]
+    tokens[:count, 0] = paths.delay_bins[order]
+    tokens[:count, 1] = paths.doppler_bins[order]
+    tokens[:count, 2] = paths.normalized_power()[order]
+    tokens[:count, 3] = 1.0
+    tokens[:count, 4] = 0.0
+    tokens[:count, 5] = 0.0
+    tokens[:count, 6] = 1.0
+    tokens[:count, 7] = paths.gains[order].real.astype(np.float32)
+    tokens[:count, 8] = paths.gains[order].imag.astype(np.float32)
     valid[:count] = True
     return tokens, valid
 
