@@ -8,7 +8,17 @@ from torch.utils.data import Dataset
 from .channel import generate_path_set, synthesize_tf_channel
 from .config import ChannelConfig, OFDMConfig
 from .interpolation import nearest_smooth_interpolation
-from .oracle import oracle_path_tokens, oracle_path_tokens_v2
+from .dd_estimation import (
+    build_dd_grid,
+    detect_paths_nms,
+    masked_matched_filter_map,
+)
+from .oracle import (
+    estimated_path_tokens_v2,
+    estimated_support_ls_reconstruction,
+    oracle_path_tokens,
+    oracle_path_tokens_v2,
+)
 from .pilots import generate_noise_grid, make_pilot_mask, observe_pilots
 
 
@@ -23,6 +33,7 @@ class DatasetConfig:
     seed: int = 2036
     cache_in_memory: bool = True
     token_version: int = 1  # 1 = legacy 7-dim, 2 = 9-dim with Re(α), Im(α)
+    token_source: str = "oracle"  # "oracle" | "estimated"
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -68,7 +79,46 @@ class SyntheticOFDMISACDataset(Dataset):
         )
         initial = nearest_smooth_interpolation(observed, mask)
         tokens, valid = oracle_path_tokens(paths, self.cfg.max_paths)
-        if self.cfg.token_version >= 2:
+        if self.cfg.token_source == "estimated":
+            # Gate 1-E: DD-estimated support + LS gains as tokens
+            grid = build_dd_grid(
+                self.ofdm.num_subcarriers, self.ofdm.num_symbols,
+                self.channel.max_delay_bins, self.channel.max_abs_doppler_bins,
+                2, 4,
+            )
+            score_map, gain_map = masked_matched_filter_map(observed, mask, grid)
+            est = detect_paths_nms(
+                score_map, gain_map, grid, num_paths=self.channel.num_paths,
+            )
+            if len(est.delay_bins) > 0:
+                # LS gain estimation at DD positions
+                H_ls = estimated_support_ls_reconstruction(
+                    self.ofdm, est, observed, mask,
+                )
+                # Extract LS gains by solving at the estimated support
+                from .oracle import _ridge_ls, _col_norms, _build_raw_dict
+                n_idx, m_idx = np.nonzero(mask)
+                A_raw = _build_raw_dict(
+                    self.ofdm.num_subcarriers, self.ofdm.num_symbols,
+                    n_idx, m_idx, est.delay_bins, est.doppler_bins,
+                )
+                _col_norms_local = _col_norms
+                norms = _col_norms_local(A_raw)
+                for j in range(A_raw.shape[1]):
+                    if norms[j] > 1e-15:
+                        A_raw[:, j] /= norms[j]
+                y = observed[mask]
+                g_hat = _ridge_ls(A_raw, y)
+                g_hat = g_hat / np.maximum(norms, np.finfo(float).eps)
+                tokens, valid = estimated_path_tokens_v2(
+                    est, g_hat, self.cfg.max_paths,
+                )
+            else:
+                # No paths detected — use empty tokens
+                tokens, valid = oracle_path_tokens(paths, self.cfg.max_paths)
+                if self.cfg.token_version >= 2:
+                    tokens, valid = oracle_path_tokens_v2(paths, self.cfg.max_paths)
+        elif self.cfg.token_version >= 2:
             tokens, valid = oracle_path_tokens_v2(paths, self.cfg.max_paths)
 
         tf_input = np.stack([initial.real, initial.imag, mask.astype(np.float64)], axis=0)

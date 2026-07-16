@@ -434,6 +434,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     # --- Fixed test bank (SAME for all seeds) ---
     token_ver = int(data_cfg.get("token_version", 1))
+    token_src = str(data_cfg.get("token_source", "oracle"))
     test_cfg_fixed = DatasetConfig(
         size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
@@ -443,6 +444,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         max_paths=int(data_cfg["max_paths"]),
         seed=base_seed + 10000,
         token_version=token_ver,
+        token_source=token_src,
     )
     # Fixed validation bank for best-checkpoint selection
     val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))
@@ -455,6 +457,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         max_paths=int(data_cfg["max_paths"]),
         seed=base_seed + 20000,
         token_version=token_ver,
+        token_source=token_src,
     )
 
     # --- Non-learned baselines (run ONCE on fixed test bank) ---
@@ -532,6 +535,14 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 "legacy_cross",
             ),
             "physics_residual": (
+                PhysicalResidualEstimator(
+                    hidden_dim=hidden_dim,
+                    num_subcarriers=ofdm.num_subcarriers,
+                    num_symbols=ofdm.num_symbols,
+                ),
+                "physical_residual",
+            ),
+            "estimated_residual": (
                 PhysicalResidualEstimator(
                     hidden_dim=hidden_dim,
                     num_subcarriers=ofdm.num_subcarriers,

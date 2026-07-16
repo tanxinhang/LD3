@@ -71,6 +71,36 @@ def oracle_path_tokens_v2(paths: PathSet, max_paths: int) -> tuple[np.ndarray, n
     return tokens, valid
 
 
+def estimated_path_tokens_v2(
+    est: EstimatedPaths,
+    ls_gains: np.ndarray,
+    max_paths: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create 9-dim tokens from DD-estimated support + LS-estimated gains.
+
+    This is the Gate 1-E token source — real-world scenario where tokens
+    come from DD detection + LS, not Oracle truth.
+    """
+    tokens = np.zeros((max_paths, 9), dtype=np.float32)
+    valid = np.zeros(max_paths, dtype=bool)
+    n_paths = min(max_paths, len(est.delay_bins))
+    # Sort by estimated power (LS gain magnitude)
+    order = np.argsort(np.abs(ls_gains))[::-1][:n_paths]
+    tokens[:n_paths, 0] = est.delay_bins[order]
+    tokens[:n_paths, 1] = est.doppler_bins[order]
+    power = np.abs(ls_gains[order]) ** 2
+    total_p = np.sum(power)
+    tokens[:n_paths, 2] = power / max(total_p, np.finfo(float).eps)
+    tokens[:n_paths, 3] = 0.7  # moderate confidence for estimated tokens
+    tokens[:n_paths, 4] = 0.2  # estimated sigma_delay
+    tokens[:n_paths, 5] = 0.1  # estimated sigma_doppler
+    tokens[:n_paths, 6] = 1.0
+    tokens[:n_paths, 7] = ls_gains[order].real.astype(np.float32)
+    tokens[:n_paths, 8] = ls_gains[order].imag.astype(np.float32)
+    valid[:n_paths] = True
+    return tokens, valid
+
+
 # ---------------------------------------------------------------------------
 # Oracle parametric reconstruction (upper bound / code-closure test)
 # ---------------------------------------------------------------------------
