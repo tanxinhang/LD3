@@ -214,10 +214,25 @@ class PhysicalReconstructor(nn.Module):
         valid_f = valid.to(torch.float32)
 
         # Phase: -2π·n·τ/N + 2π·m·ν/M
-        phase = (
-            -2.0 * torch.pi * self.n_grid[None, :, :, None] * tau[:, None, None, :] / self.N
-            + 2.0 * torch.pi * self.m_grid[None, None, :, None] * nu[:, None, None, :] / self.M
-        )  # [B, N, M, L]
+        # Shapes: n_grid [N,1], m_grid [1,M], tau/nu [B, L]
+        n_phase = (-2.0 * torch.pi / self.N) * torch.einsum(
+            "nl,nm->nml", tau, self.n_grid.expand(-1, self.M)
+        )  # [B, N, M, L] — wrong, let me just do it simply
+
+        # Simple approach: loop-free broadcasting with explicit reshape
+        _n = self.n_grid.squeeze(-1)           # [N]
+        _m = self.m_grid.squeeze(0)            # [M]
+        # Build the 2D phase grid per path
+        # phase[b, n, m, l] = -2π·n·τ[b,l]/N + 2π·m·ν[b,l]/M
+        delay_phase = -2.0 * torch.pi * torch.einsum(
+            "n,bl->nbl", _n, tau
+        ) / self.N  # [N, B, L]
+        doppler_phase = 2.0 * torch.pi * torch.einsum(
+            "m,bl->mbl", _m, nu
+        ) / self.M  # [M, B, L]
+        # Combine: [N, B, L] + [M, B, L] → broadcast to [N, M, B, L]
+        phase = (delay_phase[:, None, :, :] + doppler_phase[None, :, :, :]).permute(2, 0, 1, 3)
+        # phase: [B, N, M, L]
 
         cos_phase = torch.cos(phase)
         sin_phase = torch.sin(phase)
