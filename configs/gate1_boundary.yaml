@@ -21,11 +21,13 @@ channel:
 dataset:
   train_size: 4096
   test_size: 1024
+  val_size: 1024
   snr_min_db: 0.0
   snr_max_db: 0.0
   pilot_density: 0.125
   pilot_pattern: random
   max_paths: 8
+  token_version: 2
 training:
   epochs: 50
   batch_size: 64
