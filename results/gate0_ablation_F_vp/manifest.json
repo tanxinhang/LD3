@@ -1,0 +1,122 @@
+{
+  "config": {
+    "seed": 2036,
+    "trials": 500,
+    "ofdm": {
+      "num_subcarriers": 64,
+      "num_symbols": 14,
+      "subcarrier_spacing_hz": 120000.0,
+      "carrier_frequency_hz": 28000000000.0,
+      "cp_ratio": 0.07
+    },
+    "channel": {
+      "num_paths": 4,
+      "max_delay_bins": 12.0,
+      "max_abs_doppler_bins": 3.0,
+      "fractional_delay": true,
+      "fractional_doppler": true,
+      "exponential_power_decay": 0.25
+    },
+    "sweep": {
+      "snr_db": [
+        -5,
+        0,
+        5,
+        10,
+        15,
+        20,
+        25,
+        30
+      ],
+      "pilot_density": [
+        0.125
+      ],
+      "pilot_pattern": [
+        "random"
+      ]
+    },
+    "estimator": {
+      "oversample_delay": 2,
+      "oversample_doppler": 4,
+      "delay_tolerance_bins": 0.75,
+      "doppler_tolerance_bins": 0.5,
+      "nms_delay_radius": 2,
+      "nms_doppler_radius": 2,
+      "relative_threshold": 0.08
+    },
+    "ablation": {
+      "vp": true
+    }
+  },
+  "trial_csv": "results\\gate0_ablation_F_vp\\gate0_trials.csv",
+  "summary_csv": "results\\gate0_ablation_F_vp\\gate0_summary.csv",
+  "bootstrap_csv": "None",
+  "coherence_csv": "results\\gate0_ablation_F_vp\\gate0_coherence.csv",
+  "ambiguity_csv": "results\\gate0_ablation_F_vp\\gate0_ambiguity.csv",
+  "ablation": "_vp",
+  "paired_design": {
+    "shared_channel_bank": true,
+    "shared_noise_bank": true,
+    "pilot_mask_varies_by_pattern": true,
+    "channel_rng_seed": "[seed, density_index, snr_index, trial, 100]",
+    "noise_rng_seed": "[seed, snr_index, density_index, trial, 300]",
+    "pilot_rng_seed": "[seed, pattern_index, density_index, trial, 200]",
+    "snr_definition": "full_grid_channel_power / noise_variance"
+  },
+  "penalized_rmse": {
+    "delay_penalty_bins": 0.75,
+    "doppler_penalty_bins": 0.5,
+    "note": "Miss penalty = matching tolerance, not full search range. A missed path is 'at least one tolerance away' from any estimate."
+  },
+  "ospa": {
+    "p": 2,
+    "c": 1.0,
+    "normalization": "delay/doppler divided by respective tolerances"
+  },
+  "dictionary_coherence": {
+    "nms_delay_radius": 4,
+    "nms_doppler_radius": 8,
+    "mu_far_excludes": "local NMS neighbourhood around each column"
+  },
+  "oracle_nmse_naming": {
+    "nmse_oracle_perfect": "{\u03c4,\u03bd,\u03b1}_true \u2014 code-closure test (should approach numerical precision)",
+    "nmse_oracle_support_ls": "{\u03c4,\u03bd}_true + \u03b1\u0302_LS \u2014 isolates gain estimation error \u0394_gain",
+    "nmse_estimated_support_ls": "{\u03c4\u0302,\u03bd\u0302}_DD + \u03b1\u0302_LS \u2014 isolates support estimation error \u0394_support"
+  },
+  "gate_pass_reference": {
+    "power_recovery": 0.8,
+    "note": "A research decision threshold, not a universal theorem."
+  },
+  "gate_0_conclusion": {
+    "gate_0A_known_K": "CONDITIONAL_PASS",
+    "gate_0B_unknown_K": "NOT_YET_RUN",
+    "summary": "Gate 0-A (Known-K identifiability): CONDITIONAL PASS. Under known path count K=4 and fixed Top-K output, Random pilots with density >= 1/8 and SNR >= ~5 dB recover ~84-88% of true path power and identify ~65-74% of true paths. At density 1/4, power recovery reaches ~87-90%. The DD estimator stably captures dominant channel energy. Gate 0-B (Unknown-K detection) remains as future work.",
+    "limitations": [
+      "Fixed Top-(K=4) output \u2014 recall == precision by construction",
+      "No unknown-path-count detection or stopping rule",
+      "No per-DD-bin false alarm probability",
+      "Complex-gain accuracy not yet validated (see Gate 1)",
+      "Power recovery > 0.8 does not imply accurate TF channel NMSE"
+    ],
+    "recommended_gate_1_work_points": {
+      "main": {
+        "pilot_pattern": "random",
+        "pilot_density": 0.125,
+        "snr_db": 10,
+        "rationale": "Judge whether Oracle DD + complex-gain token has clear value."
+      },
+      "boundary": {
+        "pilot_pattern": "random",
+        "pilot_density": 0.125,
+        "snr_db": 0,
+        "rationale": "Test whether physical support helps under low-quality pilots."
+      },
+      "stress": {
+        "pilot_pattern": "random",
+        "pilot_density": 0.0625,
+        "snr_db": 5,
+        "rationale": "Test whether Gate 1 benefits persist at low pilot density."
+      }
+    }
+  }
+}
