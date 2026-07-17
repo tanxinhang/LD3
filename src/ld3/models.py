@@ -277,23 +277,16 @@ class PhysicalResidualEstimator(nn.Module):
         )
 
         # Per-path gate MLP: token features → scalar reliability per path
-        # Input: [τ, ν, Re(α), Im(α), |α|², confidence, σ_τ, σ_ν, relevance]
+        # Bias-init large positive → sigmoid ≈ 1 at step 0 → H_phys untouched
         self.path_gate = nn.Sequential(
             nn.Linear(9, hidden_dim // 2),
             nn.GELU(),
             nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.GELU(),
             nn.Linear(hidden_dim // 4, 1),
-            nn.Sigmoid(),
         )
-
-        # Global quality gate: TF features → spatial trust map
-        self.global_gate = nn.Sequential(
-            nn.Conv2d(hidden_dim + 4, hidden_dim // 2, 1),
-            nn.GELU(),
-            nn.Conv2d(hidden_dim // 2, 1, 1),
-            nn.Sigmoid(),
-        )
+        nn.init.normal_(self.path_gate[-1].weight, 0, 0.01)
+        nn.init.constant_(self.path_gate[-1].bias, 3.0)  # sigmoid(3) ≈ 0.95
 
         # Residual correction — zero-init so training starts at H_phys.
         self.residual = nn.Sequential(
@@ -316,25 +309,22 @@ class PhysicalResidualEstimator(nn.Module):
         tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
         H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
 
-        # 2. Per-path reliability gating
-        g_l = self.path_gate(path_tokens).squeeze(-1)     # [B, L]
-        g_l = g_l * path_valid.to(g_l.dtype)              # mask invalid paths
-        g_l = g_l / (g_l.sum(dim=-1, keepdim=True) + 1e-8)  # normalise
+        # 2. Per-path reliability gating (raw sigmoid, no normalisation)
+        g_l = torch.sigmoid(self.path_gate(path_tokens)).squeeze(-1)  # [B, L]
+        g_l = g_l * path_valid.to(g_l.dtype)              # mask invalid
 
-        # Power-weighted global quality
-        alpha_power = path_tokens[:, :, 2]                 # |α|² (normalised)
-        q_global = (g_l * alpha_power).sum(dim=-1) / (alpha_power.sum(dim=-1) + 1e-8)
-        q_global = q_global[:, None, None, None]           # [B, 1, 1, 1]
+        # 3. Power-weighted global quality (single scalar per sample)
+        alpha_power = path_tokens[:, :, 2] + 1e-8          # |α|²
+        q_global = (g_l * alpha_power).sum(dim=-1) / alpha_power.sum(dim=-1)
+        q_global = q_global[:, None, None, None]            # [B, 1, 1, 1]
 
-        # 3. Per-path weighted physical reconstruction
+        # 4. Per-path weighted physical reconstruction
         H_phys = self.physics(path_tokens, path_valid, path_weights=g_l)
 
-        # 4. Spatial fusion gate (TF features + physics + TF estimate)
-        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
-        g_spatial = self.global_gate(gate_input)           # [B, 1, N, M]
-        H_fused = g_spatial * H_phys + (1.0 - g_spatial) * H_tf
+        # 5. Global fusion: q_global weights physics vs TF
+        H_fused = q_global * H_phys + (1.0 - q_global) * H_tf
 
-        # 5. Residual correction
+        # 6. Residual correction
         residual_input = torch.cat([tf_features, H_fused], dim=1)
         delta = self.residual(residual_input)
         H_out = H_fused + delta
@@ -342,6 +332,5 @@ class PhysicalResidualEstimator(nn.Module):
         diagnostics = {
             "gate_mean": q_global.mean(),
             "g_per_path": g_l,
-            "g_spatial": g_spatial,
         }
         return H_out, diagnostics
