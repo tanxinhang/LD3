@@ -357,13 +357,14 @@ class AMMSEEstimator(nn.Module):
 
         # Frequency attention: subcarriers as tokens, each symbol is a sequence
         # [B, H, N, M] → [B*M, N, H]
-        x_f = x.permute(0, 3, 2, 1).reshape(batch * M, N, self.input_proj[0].out_channels)
+        H = self.input_proj.out_channels
+        x_f = x.permute(0, 3, 2, 1).reshape(batch * M, N, H)
         x_f, _ = self.freq_attn(x_f, x_f, x_f)
-        x_f = x_f.reshape(batch, M, N, -1).permute(0, 3, 1, 2)  # [B, H, N, M]
+        x_f = x_f.reshape(batch, M, N, H).permute(0, 3, 1, 2)  # [B, H, N, M]
 
         # Time attention: symbols as tokens, each subcarrier is a sequence
         # [B, H, N, M] → [B*N, M, H]
-        x_t = x.permute(0, 2, 3, 1).reshape(batch * N, M, self.input_proj[0].out_channels)
+        x_t = x.permute(0, 2, 3, 1).reshape(batch * N, M, H)
         x_t, _ = self.time_attn(x_t, x_t, x_t)
         x_t = x_t.reshape(batch, N, M, -1).permute(0, 3, 1, 2)  # [B, H, N, M]
 
