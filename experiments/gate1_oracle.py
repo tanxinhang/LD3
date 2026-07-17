@@ -733,6 +733,63 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             )
         all_results["hierarchical_bootstrap"] = hb
 
+    # --- Per-SNR evaluation (for multi-SNR models) ---
+    snr_min = float(data_cfg["snr_min_db"])
+    snr_max = float(data_cfg["snr_max_db"])
+    if abs(snr_max - snr_min) > 0.1:
+        snr_points = [-5, 0, 5, 10, 15, 20]
+        per_snr_results: dict[str, dict[str, Any]] = {}
+        # Use the LAST seed's models for evaluation
+        print("\n--- Per-SNR evaluation ---")
+        for snr_val in snr_points:
+            snr_cfg = DatasetConfig(
+                size=int(data_cfg["test_size"]),
+                snr_min_db=float(snr_val), snr_max_db=float(snr_val),
+                pilot_density=float(data_cfg["pilot_density"]),
+                pilot_pattern=str(data_cfg["pilot_pattern"]),
+                max_paths=int(data_cfg["max_paths"]),
+                seed=base_seed + 30000 + int(snr_val * 100),
+                token_version=token_ver,
+                token_source=token_src,
+                token_refine=token_ref,
+                token_vp_rounds=token_vp_r,
+                token_vp_probes=token_vp_p,
+            )
+            snr_nl, _ = _evaluate_non_learned_with_samples(
+                ofdm, channel, snr_cfg, estimator_cfg
+            )
+            snr_info: dict[str, dict] = {"non_learned": snr_nl}
+            # Evaluate trained models on this SNR
+            snr_set = SyntheticOFDMISACDataset(ofdm, channel, snr_cfg)
+            snr_loader = DataLoader(snr_set, batch_size=int(training["batch_size"]), shuffle=False, num_workers=0)
+            for name, (model, mtype) in models.items():
+                if uses_tokens := mtype != "none":
+                    nmse_list = []
+                    model.eval()
+                    with torch.no_grad():
+                        for batch in snr_loader:
+                            batch = move_batch(batch, device)
+                            output, _ = model(batch["tf_input"], batch["path_tokens"], batch["path_valid"])
+                            nmse_list.append(float(nmse_loss(output, batch["target"]).cpu()))
+                    nmse_lin = float(np.mean(nmse_list))
+                    snr_info[name] = {"nmse_linear": nmse_lin, "nmse_db": float(10.0 * np.log10(max(nmse_lin, 1e-12)))}
+                else:
+                    nmse_list = []
+                    model.eval()
+                    with torch.no_grad():
+                        for batch in snr_loader:
+                            batch = move_batch(batch, device)
+                            output = model(batch["tf_input"])
+                            nmse_list.append(float(nmse_loss(output, batch["target"]).cpu()))
+                    nmse_lin = float(np.mean(nmse_list))
+                    snr_info[name] = {"nmse_linear": nmse_lin, "nmse_db": float(10.0 * np.log10(max(nmse_lin, 1e-12)))}
+            per_snr_results[f"snr_{snr_val:+d}dB"] = snr_info
+            # Print summary
+            er_db = snr_info.get("estimated_residual", snr_info.get("physics_residual", {})).get("nmse_db", 0)
+            ddls_db = snr_nl["nmse_estimated_support_ls"]["nmse_db"]
+            print(f"  SNR={snr_val:+d}: ER={er_db:+.2f} dB, DD+LS={ddls_db:+.2f} dB")
+        all_results["per_snr_evaluation"] = per_snr_results
+
     # --- Gate 1 status matrix ---
     nmse_perfect = non_learned_test["nmse_oracle_perfect"]["nmse_db"]
     nmse_oracle_ls = non_learned_test["nmse_oracle_support_ls"]["nmse_db"]
