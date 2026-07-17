@@ -200,8 +200,9 @@ class PhysicalReconstructor(nn.Module):
 
     def forward(
         self,
-        tokens: torch.Tensor,       # [B, L, 9] — must have τ at [:,0], ν at [:,1], Re(α) at [:,7], Im(α) at [:,8]
+        tokens: torch.Tensor,       # [B, L, 9]
         valid: torch.Tensor,        # [B, L]
+        path_weights: torch.Tensor | None = None,  # [B, L] optional per-path weight
     ) -> torch.Tensor:
         """Returns H_phys: [B, 2, N, M] (real, imag)."""
         batch, L, _ = tokens.shape
@@ -212,6 +213,8 @@ class PhysicalReconstructor(nn.Module):
         alpha_re = tokens[:, :, 7]  # [B, L]
         alpha_im = tokens[:, :, 8]  # [B, L]
         valid_f = valid.to(torch.float32)
+        if path_weights is not None:
+            valid_f = valid_f * path_weights  # incorporate per-path gate
 
         # Phase: -2π·n·τ/N + 2π·m·ν/M
         _n = self.n_grid.squeeze(-1)           # [N]
@@ -273,8 +276,19 @@ class PhysicalResidualEstimator(nn.Module):
             nn.Conv2d(hidden_dim, 2, 1),
         )
 
-        # Fusion gate: learns where to trust physics vs TF
-        self.gate = nn.Sequential(
+        # Per-path gate MLP: token features → scalar reliability per path
+        # Input: [τ, ν, Re(α), Im(α), |α|², confidence, σ_τ, σ_ν, relevance]
+        self.path_gate = nn.Sequential(
+            nn.Linear(9, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 4, 1),
+            nn.Sigmoid(),
+        )
+
+        # Global quality gate: TF features → spatial trust map
+        self.global_gate = nn.Sequential(
             nn.Conv2d(hidden_dim + 4, hidden_dim // 2, 1),
             nn.GELU(),
             nn.Conv2d(hidden_dim // 2, 1, 1),
@@ -282,14 +296,11 @@ class PhysicalResidualEstimator(nn.Module):
         )
 
         # Residual correction — zero-init so training starts at H_phys.
-        # When tokens are perfect (Oracle), the model should output H_phys
-        # unchanged; the residual only corrects imperfections in H_phys.
         self.residual = nn.Sequential(
             nn.Conv2d(hidden_dim + 2, hidden_dim, 3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_dim, 2, 1),
         )
-        # Zero-init final layer → ΔH = 0 at step 0
         nn.init.zeros_(self.residual[-1].weight)
         nn.init.zeros_(self.residual[-1].bias)
 
@@ -305,21 +316,32 @@ class PhysicalResidualEstimator(nn.Module):
         tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
         H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
 
-        # 2. Explicit physical reconstruction
-        H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
+        # 2. Per-path reliability gating
+        g_l = self.path_gate(path_tokens).squeeze(-1)     # [B, L]
+        g_l = g_l * path_valid.to(g_l.dtype)              # mask invalid paths
+        g_l = g_l / (g_l.sum(dim=-1, keepdim=True) + 1e-8)  # normalise
 
-        # 3. Gated fusion
-        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)  # [B, H+4, N, M]
-        g = self.gate(gate_input)                          # [B, 1, N, M]
-        H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
+        # Power-weighted global quality
+        alpha_power = path_tokens[:, :, 2]                 # |α|² (normalised)
+        q_global = (g_l * alpha_power).sum(dim=-1) / (alpha_power.sum(dim=-1) + 1e-8)
+        q_global = q_global[:, None, None, None]           # [B, 1, 1, 1]
 
-        # 4. Residual correction
+        # 3. Per-path weighted physical reconstruction
+        H_phys = self.physics(path_tokens, path_valid, path_weights=g_l)
+
+        # 4. Spatial fusion gate (TF features + physics + TF estimate)
+        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
+        g_spatial = self.global_gate(gate_input)           # [B, 1, N, M]
+        H_fused = g_spatial * H_phys + (1.0 - g_spatial) * H_tf
+
+        # 5. Residual correction
         residual_input = torch.cat([tf_features, H_fused], dim=1)
-        delta = self.residual(residual_input)              # [B, 2, N, M]
+        delta = self.residual(residual_input)
         H_out = H_fused + delta
 
         diagnostics = {
-            "gate_mean": g.mean(),
-            "gate": g,
+            "gate_mean": q_global.mean(),
+            "g_per_path": g_l,
+            "g_spatial": g_spatial,
         }
         return H_out, diagnostics
