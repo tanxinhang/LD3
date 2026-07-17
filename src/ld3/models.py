@@ -419,11 +419,21 @@ class D2ANEstimator(nn.Module):
 
         self.input_proj = nn.Conv2d(3, hidden_dim, 3, padding=1)
 
-        # FC network: global features → basis combination weights
+        # FC: global features → basis combination weights
         self.weight_net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, self.num_bases),
+        )
+
+        # Per-channel DD attention: basis → per-channel spatial weights
+        self.basis_proj = nn.Conv2d(1, hidden_dim, 1)
+
+        # Multi-scale DD attention
+        self.attn_fusion = nn.Sequential(
+            nn.Conv2d(hidden_dim * 2, hidden_dim, 3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
         )
 
         self.head = nn.Sequential(
@@ -436,17 +446,23 @@ class D2ANEstimator(nn.Module):
         batch, _, N, M = tf_input.shape
         features = self.input_proj(tf_input)  # [B, H, N, M]
 
-        # Global pool → FC → basis weights
+        # Per-position DD attention: each (n,m) gets attention from DD basis
+        # Pool features spatially → learned basis weights → DD attention map
         feat_pool = features.mean(dim=(2, 3))  # [B, H]
+        # FC to produce basis weights
         w = self.weight_net(feat_pool)  # [B, D*F]
 
-        # Build DD attention map from basis: a = |B^H w|²
-        # B: [D*F, N*M], w: [B, D*F] → attn: [B, N*M]
+        # Project DD basis with learned weights to get attention map [B, 1, N, M]
         attn_real = w @ self.basis_cos  # [B, N*M]
-        attn_imag = w @ self.basis_sin  # [B, N*M]
+        attn_imag = w @ self.basis_sin
         attn = (attn_real ** 2 + attn_imag ** 2).reshape(batch, 1, N, M)
         attn = attn / (attn.amax(dim=(2, 3), keepdim=True) + 1e-8)
 
-        weighted = attn * features
-        dec_input = torch.cat([weighted, tf_input[:, :2]], dim=1)
+        # Per-channel attention: expand to H channels
+        attn_h = self.basis_proj(attn)  # [B, H, N, M]
+
+        # Fuse DD-attended features with original
+        fused = self.attn_fusion(torch.cat([attn_h * features, features], dim=1))
+
+        dec_input = torch.cat([fused, tf_input[:, :2]], dim=1)
         return tf_input[:, :2] + self.head(dec_input)
