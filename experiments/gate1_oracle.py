@@ -303,11 +303,6 @@ def train_model(
                 output = model(batch["tf_input"])
                 diagnostics = {}
             loss = nmse_loss(output, batch["target"])
-            # Gate bias: encourage trusting H_phys unless TF correction is needed.
-            # λ = 0.005 small enough to not dominate NMSE — just breaks symmetry.
-            if model_type == "physical_residual" and "gate_mean" in diagnostics:
-                gate_bias = 0.005 * ((1.0 - diagnostics["gate_mean"]) ** 2)
-                loss = loss + gate_bias
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at epoch {epoch}")
             loss.backward()
@@ -491,6 +486,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     per_seed_tf_nmse: list[np.ndarray] = []
     per_seed_cross_nmse: list[np.ndarray] = []
     per_seed_residual_nmse: list[np.ndarray] = []
+    per_seed_estimated_residual_nmse: list[np.ndarray] = []
+    per_seed_estimated_residual_gate: list[float] = []
     per_seed_cross_shuffled_nmse: list[np.ndarray] = []
     per_seed_cross_null_nmse: list[np.ndarray] = []
 
@@ -650,6 +647,20 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 per_seed_cross_nmse.append(sample_nmse_arr)
             elif model_type == "physical_residual":
                 per_seed_residual_nmse.append(sample_nmse_arr)
+                # Separate estimated_residual for paired CI vs DD+LS
+                if name == "estimated_residual":
+                    per_seed_estimated_residual_nmse.append(sample_nmse_arr)
+                    # Record per-sample gate mean for auditing
+                    model.eval()
+                    gate_vals = []
+                    with torch.no_grad():
+                        for batch in test_loader:
+                            batch = move_batch(batch, device)
+                            _, diag = model(
+                                batch["tf_input"], batch["path_tokens"], batch["path_valid"]
+                            )
+                            gate_vals.append(float(diag["gate_mean"].cpu()))
+                    per_seed_estimated_residual_gate.append(float(np.mean(gate_vals)))
 
             seed_results[name] = {
                 "history": history,
@@ -689,12 +700,20 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             hb["residual_vs_tf_only_paired_gain_linear"] = paired_bootstrap_gain(
                 per_seed_tf_nmse, per_seed_residual_nmse,
             )
-            # Paired CI: estimated_residual vs DD+LS (deterministic baseline)
-            ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
-            ddls_replicated = [ddls_arr] * len(per_seed_residual_nmse)
-            hb["residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
-                ddls_replicated, per_seed_residual_nmse,
-            )
+            # Paired CI: estimated_residual vs DD+LS
+            if per_seed_estimated_residual_nmse:
+                ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
+                ddls_replicated = [ddls_arr] * len(per_seed_estimated_residual_nmse)
+                hb["estimated_residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
+                    ddls_replicated, per_seed_estimated_residual_nmse,
+                )
+                hb["estimated_residual_nmse_linear"] = hierarchical_bootstrap_seeds(
+                    per_seed_estimated_residual_nmse
+                )
+                if per_seed_estimated_residual_gate:
+                    hb["estimated_residual_gate_mean"] = float(
+                        np.mean(per_seed_estimated_residual_gate)
+                    )
         if per_seed_cross_shuffled_nmse:
             hb["cross_attention_shuffled_nmse_linear"] = (
                 hierarchical_bootstrap_seeds(per_seed_cross_shuffled_nmse)
@@ -775,6 +794,14 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             if "physical_residual_nmse_linear" in hb:
                 res_hb = hb["physical_residual_nmse_linear"]
                 print(f"  Physical Residual NMSE linear: {res_hb['mean']:.6f} [{res_hb['ci_lower']:.6f}, {res_hb['ci_upper']:.6f}]")
+            if "estimated_residual_nmse_linear" in hb:
+                er_hb = hb["estimated_residual_nmse_linear"]
+                print(f"  Estimated Residual NMSE linear: {er_hb['mean']:.6f} [{er_hb['ci_lower']:.6f}, {er_hb['ci_upper']:.6f}]")
+            if "estimated_residual_vs_ddls_paired_gain_linear" in hb:
+                pg = hb["estimated_residual_vs_ddls_paired_gain_linear"]
+                print(f"  EstRes vs DD+LS paired gain: mean={pg['mean_diff']:.5f} [{pg['ci_lower']:.5f}, {pg['ci_upper']:.5f}]")
+            if "estimated_residual_gate_mean" in hb:
+                print(f"  Estimated Residual gate mean: {hb['estimated_residual_gate_mean']:.4f}")
     print(f"\n--- Gate 1 Status ---")
     for gate, info in all_results["gate_1_status"].items():
         print(f"  {gate}: {info['status']}")
