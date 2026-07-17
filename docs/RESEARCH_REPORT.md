@@ -86,11 +86,14 @@ DD+LS NMSE as a function of pilot density. 500 trials per point.
 | 0.25 | 224 | 0.175 | 0.759 | 0.872 |
 | 0.5 | 448 | 0.168 | 0.791 | 0.888 |
 
-**Key finding**: ρ=0.125 is the sweet spot. Doubling to ρ=0.25 improves NMSE
-only 13% (0.201→0.175) at 2× pilot overhead. Further increase to ρ=0.5 yields
+**Key finding**: ρ=0.125 constitutes a favorable pilot-efficiency knee point,
+retaining most of the channel-reconstruction benefit while avoiding the rapidly
+diminishing returns at higher densities. Doubling to ρ=0.25 improves NMSE only
+13% (0.201→0.175) at 2× pilot overhead. Further increase to ρ=0.5 yields
 marginal gain (0.175→0.168). Below ρ=0.0625, recall drops below 0.63 and NMSE
-degrades rapidly. Power recovery is more robust than recall — dominant paths are
-found even with very few pilots.
+degrades rapidly. Power recovery is more robust than recall under the current
+non-uniform (exponential decay) path-power profile — the detector preferentially
+retains dominant-energy paths.
 
 ### 2.5 Path Count Scan (ρ=0.125, SNR=10 dB)
 
@@ -103,9 +106,19 @@ DD+LS NMSE as K increases. 500 trials per point.
 | 8 | 0.305 | 0.523 | 0.750 |
 
 **Key finding**: Recall degrades with K (0.73→0.60→0.52), but power recovery
-stays above 0.75. The DD detector prioritises strong paths and misses weak ones.
-This implies Physical Residual's learned residual has larger potential gain at
-higher K, where DD support quality degrades and residual compensation matters more.
+stays above 0.75. Under the exponential power decay profile, later-added paths
+are naturally weaker, so the DD detector preferentially retains dominant-energy
+paths while missing weaker ones. Higher K leaves a larger unreconstructed
+residual after DD-based parametric estimation — creating potential (but not yet
+verified) headroom for learned residual compensation. Whether the residual
+network's gain G_learn(K) increases, stays flat, or decreases with K requires a
+Gate 1 K-sweep experiment to determine.
+
+**Note**: All K-scan experiments use Known-K (true path count provided to the
+detector). At K=8, the detector outputs 8 candidates but only ~4.2 match true
+paths. The remaining ~3.8 are false candidates, so the residual network must
+both compensate for missed weak paths AND suppress contributions from incorrect
+tokens. This makes safe fusion (Gate 2) increasingly important as K grows.
 
 ---
 
