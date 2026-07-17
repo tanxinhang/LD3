@@ -214,12 +214,6 @@ class PhysicalReconstructor(nn.Module):
         valid_f = valid.to(torch.float32)
 
         # Phase: -2π·n·τ/N + 2π·m·ν/M
-        # Shapes: n_grid [N,1], m_grid [1,M], tau/nu [B, L]
-        n_phase = (-2.0 * torch.pi / self.N) * torch.einsum(
-            "nl,nm->nml", tau, self.n_grid.expand(-1, self.M)
-        )  # [B, N, M, L] — wrong, let me just do it simply
-
-        # Simple approach: loop-free broadcasting with explicit reshape
         _n = self.n_grid.squeeze(-1)           # [N]
         _m = self.m_grid.squeeze(0)            # [M]
         # Build the 2D phase grid per path

@@ -15,7 +15,6 @@ from .dd_estimation import (
 )
 from .oracle import (
     estimated_path_tokens_v2,
-    estimated_support_ls_reconstruction,
     oracle_path_tokens,
     oracle_path_tokens_v2,
 )
@@ -91,19 +90,14 @@ class SyntheticOFDMISACDataset(Dataset):
                 score_map, gain_map, grid, num_paths=self.channel.num_paths,
             )
             if len(est.delay_bins) > 0:
-                # LS gain estimation at DD positions
-                H_ls = estimated_support_ls_reconstruction(
-                    self.ofdm, est, observed, mask,
-                )
-                # Extract LS gains by solving at the estimated support
+                # LS gain estimation at DD-detected positions (single pass)
                 from .oracle import _ridge_ls, _col_norms, _build_raw_dict
                 n_idx, m_idx = np.nonzero(mask)
                 A_raw = _build_raw_dict(
                     self.ofdm.num_subcarriers, self.ofdm.num_symbols,
                     n_idx, m_idx, est.delay_bins, est.doppler_bins,
                 )
-                _col_norms_local = _col_norms
-                norms = _col_norms_local(A_raw)
+                norms = _col_norms(A_raw)
                 for j in range(A_raw.shape[1]):
                     if norms[j] > 1e-15:
                         A_raw[:, j] /= norms[j]
@@ -114,10 +108,10 @@ class SyntheticOFDMISACDataset(Dataset):
                     est, g_hat, self.cfg.max_paths,
                 )
             else:
-                # No paths detected — use empty tokens
-                tokens, valid = oracle_path_tokens(paths, self.cfg.max_paths)
-                if self.cfg.token_version >= 2:
-                    tokens, valid = oracle_path_tokens_v2(paths, self.cfg.max_paths)
+                # No paths detected — truly empty tokens, no Oracle leak
+                dim = 9 if self.cfg.token_version >= 2 else 7
+                tokens = np.zeros((self.cfg.max_paths, dim), dtype=np.float32)
+                valid = np.zeros(self.cfg.max_paths, dtype=bool)
         elif self.cfg.token_version >= 2:
             tokens, valid = oracle_path_tokens_v2(paths, self.cfg.max_paths)
 
