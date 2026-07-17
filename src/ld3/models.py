@@ -202,19 +202,15 @@ class PhysicalReconstructor(nn.Module):
         self,
         tokens: torch.Tensor,       # [B, L, 9]
         valid: torch.Tensor,        # [B, L]
-        path_weights: torch.Tensor | None = None,  # [B, L] optional per-path weight
     ) -> torch.Tensor:
         """Returns H_phys: [B, 2, N, M] (real, imag)."""
         batch, L, _ = tokens.shape
-        device = tokens.device
 
         tau = tokens[:, :, 0]    # [B, L]
         nu = tokens[:, :, 1]     # [B, L]
         alpha_re = tokens[:, :, 7]  # [B, L]
         alpha_im = tokens[:, :, 8]  # [B, L]
         valid_f = valid.to(torch.float32)
-        if path_weights is not None:
-            valid_f = valid_f * path_weights  # incorporate per-path gate
 
         # Phase: -2π·n·τ/N + 2π·m·ν/M
         _n = self.n_grid.squeeze(-1)           # [N]
@@ -276,17 +272,13 @@ class PhysicalResidualEstimator(nn.Module):
             nn.Conv2d(hidden_dim, 2, 1),
         )
 
-        # Per-path gate MLP: token features → scalar reliability per path
-        # Bias-init large positive → sigmoid ≈ 1 at step 0 → H_phys untouched
-        self.path_gate = nn.Sequential(
-            nn.Linear(9, hidden_dim // 2),
+        # Fusion gate: learns where to trust physics vs TF
+        self.gate = nn.Sequential(
+            nn.Conv2d(hidden_dim + 4, hidden_dim // 2, 1),
             nn.GELU(),
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
-            nn.GELU(),
-            nn.Linear(hidden_dim // 4, 1),
+            nn.Conv2d(hidden_dim // 2, 1, 1),
+            nn.Sigmoid(),
         )
-        nn.init.normal_(self.path_gate[-1].weight, 0, 0.01)
-        nn.init.constant_(self.path_gate[-1].bias, 3.0)  # sigmoid(3) ≈ 0.95
 
         # Residual correction — zero-init so training starts at H_phys.
         self.residual = nn.Sequential(
@@ -309,28 +301,21 @@ class PhysicalResidualEstimator(nn.Module):
         tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
         H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
 
-        # 2. Per-path reliability gating (raw sigmoid, no normalisation)
-        g_l = torch.sigmoid(self.path_gate(path_tokens)).squeeze(-1)  # [B, L]
-        g_l = g_l * path_valid.to(g_l.dtype)              # mask invalid
+        # 2. Explicit physical reconstruction
+        H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
 
-        # 3. Power-weighted global quality (single scalar per sample)
-        alpha_power = path_tokens[:, :, 2] + 1e-8          # |α|²
-        q_global = (g_l * alpha_power).sum(dim=-1) / alpha_power.sum(dim=-1)
-        q_global = q_global[:, None, None, None]            # [B, 1, 1, 1]
+        # 3. Gated fusion
+        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)  # [B, H+4, N, M]
+        g = self.gate(gate_input)                          # [B, 1, N, M]
+        H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
 
-        # 4. Per-path weighted physical reconstruction
-        H_phys = self.physics(path_tokens, path_valid, path_weights=g_l)
-
-        # 5. Global fusion: q_global weights physics vs TF
-        H_fused = q_global * H_phys + (1.0 - q_global) * H_tf
-
-        # 6. Residual correction
+        # 4. Residual correction
         residual_input = torch.cat([tf_features, H_fused], dim=1)
-        delta = self.residual(residual_input)
+        delta = self.residual(residual_input)              # [B, 2, N, M]
         H_out = H_fused + delta
 
         diagnostics = {
-            "gate_mean": q_global.mean(),
-            "g_per_path": g_l,
+            "gate_mean": g.mean(),
+            "gate": g,
         }
         return H_out, diagnostics
