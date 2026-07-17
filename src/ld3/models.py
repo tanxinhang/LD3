@@ -327,21 +327,34 @@ class PhysicalResidualEstimator(nn.Module):
 
 
 class AMMSEEstimator(nn.Module):
-    """Simplified A-MMSE baseline — Attention-Aided MMSE [Ha et al., 2024].
+    """A-MMSE — Attention-Aided MMSE [Ha et al., 2024].
 
-    Uses depthwise-separable Conv2d over frequency × time as a faithful
-    approximation of separable self-attention.  No reshape/permute issues.
-    No DD prior — pure TF-domain learning.
+    Two-stage separable self-attention:
+      1. Frequency encoder: MHA over N subcarriers (per-symbol)
+      2. Time encoder: MHA over M symbols (per-subcarrier)
+    No DD prior — pure TF-domain learning from interpolated LS + pilot mask.
     """
 
     def __init__(self, hidden_dim: int = 48, num_subcarriers: int = 64, num_symbols: int = 14) -> None:
         super().__init__()
+        self.hidden_dim = hidden_dim
+        self.N = num_subcarriers
+        self.M = num_symbols
+
         self.input_proj = nn.Conv2d(3, hidden_dim, 3, padding=1)
-        # Frequency "attention" ≈ 1D conv along subcarrier axis
-        self.freq_conv = nn.Conv2d(hidden_dim, hidden_dim, (7, 1), padding=(3, 0), groups=hidden_dim)
-        # Time "attention" ≈ 1D conv along symbol axis
-        self.time_conv = nn.Conv2d(hidden_dim, hidden_dim, (1, 7), padding=(0, 3), groups=hidden_dim)
-        self.fusion = nn.Conv2d(hidden_dim, hidden_dim, 1)
+
+        # Frequency attention: N subcarrier-tokens, each with H features
+        self.freq_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=4, batch_first=True,
+        )
+        self.freq_norm = nn.LayerNorm(hidden_dim)
+
+        # Time attention: M symbol-tokens, each with H features
+        self.time_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim, num_heads=2, batch_first=True,
+        )
+        self.time_norm = nn.LayerNorm(hidden_dim)
+
         self.decoder = nn.Sequential(
             nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -349,16 +362,31 @@ class AMMSEEstimator(nn.Module):
         )
 
     def forward(self, tf_input: torch.Tensor) -> torch.Tensor:
-        x = self.input_proj(tf_input)
-        x = self.fusion(self.freq_conv(x) + self.time_conv(x) + x)
-        return tf_input[:, :2] + self.decoder(x)
+        batch, _, N, M = tf_input.shape
+        x = self.input_proj(tf_input)  # [B, H, N, M]
+
+        # --- Frequency attention: per-symbol, tokens = subcarriers ---
+        # [B, H, N, M] → [B*M, N, H]
+        x_f = x.permute(0, 3, 2, 1).contiguous().view(batch * M, N, self.hidden_dim)
+        x_f, _ = self.freq_attn(x_f, x_f, x_f)
+        x_f = self.freq_norm(x_f + x_f)  # residual + norm
+        x_f = x_f.view(batch, M, N, self.hidden_dim).permute(0, 3, 1, 2)  # [B, H, N, M]
+
+        # --- Time attention: per-subcarrier, tokens = symbols ---
+        # [B, H, N, M] → [B*N, M, H]
+        x_t = x.permute(0, 2, 3, 1).contiguous().view(batch * N, M, self.hidden_dim)
+        x_t, _ = self.time_attn(x_t, x_t, x_t)
+        x_t = self.time_norm(x_t + x_t)
+        x_t = x_t.view(batch, N, M, self.hidden_dim).permute(0, 3, 1, 2)  # [B, H, N, M]
+
+        return tf_input[:, :2] + self.decoder(x_f + x_t + x)
 
 
 class D2ANEstimator(nn.Module):
-    """Simplified D2AN baseline — Delay-Doppler Attention Network [Zhao et al., 2026].
+    """D2AN — Delay-Doppler Attention Network [Zhao et al., 2026].
 
-    Key idea: learn DD-domain attention weights.
-    FC network → attention map → TF channel estimate.
+    DD complex-exponential basis functions uniformly sampled in (τ, ν) space.
+    FC network learns combination weights → DD attention map → TF estimate.
     """
 
     def __init__(self, hidden_dim: int = 48, num_subcarriers: int = 64, num_symbols: int = 14,
@@ -366,17 +394,38 @@ class D2ANEstimator(nn.Module):
         super().__init__()
         self.N = num_subcarriers
         self.M = num_symbols
+        self.num_delay = num_delay
+        self.num_doppler = num_doppler
         self.num_bases = num_delay * num_doppler
 
-        # FC network to learn basis combination weights (not pre-computing basis)
+        # DD basis: uniform grid
+        tau = torch.linspace(0, 12.0, num_delay)
+        nu = torch.linspace(-3.0, 3.0, num_doppler)
+        n = torch.arange(num_subcarriers, dtype=torch.float32)
+        m = torch.arange(num_symbols, dtype=torch.float32)
+
+        # Build basis: [D*F, N*M] real-valued (cos + sin stacked)
+        basis_cos = torch.zeros(self.num_bases, N * M)
+        basis_sin = torch.zeros(self.num_bases, N * M)
+        for d in range(num_delay):
+            for f in range(num_doppler):
+                idx = d * num_doppler + f
+                phase = (-2.0 * torch.pi * n[:, None] * tau[d] / N
+                         + 2.0 * torch.pi * m[None, :] * nu[f] / M)
+                basis_cos[idx] = torch.cos(phase).reshape(-1)
+                basis_sin[idx] = torch.sin(phase).reshape(-1)
+        self.register_buffer("basis_cos", basis_cos)  # [D*F, N*M]
+        self.register_buffer("basis_sin", basis_sin)
+
+        self.input_proj = nn.Conv2d(3, hidden_dim, 3, padding=1)
+
+        # FC network: global features → basis combination weights
         self.weight_net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
-            nn.Linear(hidden_dim, num_subcarriers * num_symbols),
-            nn.Sigmoid(),
+            nn.Linear(hidden_dim, self.num_bases),
         )
 
-        self.input_proj = nn.Conv2d(3, hidden_dim, 3, padding=1)
         self.head = nn.Sequential(
             nn.Conv2d(hidden_dim + 2, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -387,12 +436,17 @@ class D2ANEstimator(nn.Module):
         batch, _, N, M = tf_input.shape
         features = self.input_proj(tf_input)  # [B, H, N, M]
 
-        # Global pool → FC → spatial attention map
+        # Global pool → FC → basis weights
         feat_pool = features.mean(dim=(2, 3))  # [B, H]
-        attn = self.weight_net(feat_pool)  # [B, N*M]
-        attn = attn.reshape(batch, 1, N, M)
+        w = self.weight_net(feat_pool)  # [B, D*F]
 
-        # Attention-weighted feature
+        # Build DD attention map from basis: a = |B^H w|²
+        # B: [D*F, N*M], w: [B, D*F] → attn: [B, N*M]
+        attn_real = w @ self.basis_cos  # [B, N*M]
+        attn_imag = w @ self.basis_sin  # [B, N*M]
+        attn = (attn_real ** 2 + attn_imag ** 2).reshape(batch, 1, N, M)
+        attn = attn / (attn.amax(dim=(2, 3), keepdim=True) + 1e-8)
+
         weighted = attn * features
         dec_input = torch.cat([weighted, tf_input[:, :2]], dim=1)
         return tf_input[:, :2] + self.head(dec_input)
