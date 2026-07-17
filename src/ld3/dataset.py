@@ -12,6 +12,7 @@ from .dd_estimation import (
     build_dd_grid,
     detect_paths_nms,
     masked_matched_filter_map,
+    refine_paths_variable_projection,
 )
 from .oracle import (
     estimated_path_tokens_v2,
@@ -33,6 +34,7 @@ class DatasetConfig:
     cache_in_memory: bool = True
     token_version: int = 1  # 1 = legacy 7-dim, 2 = 9-dim with Re(α), Im(α)
     token_source: str = "oracle"  # "oracle" | "estimated"
+    token_refine: str = ""  # "" | "vp" — apply continuous refinement to estimated tokens
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -90,7 +92,16 @@ class SyntheticOFDMISACDataset(Dataset):
                 score_map, gain_map, grid, num_paths=self.channel.num_paths,
             )
             if len(est.delay_bins) > 0:
-                # LS gain estimation at DD-detected positions (single pass)
+                # Optional: VP continuous refinement
+                if self.cfg.token_refine == "vp":
+                    est, _vp_diag = refine_paths_variable_projection(
+                        est,
+                        pilot_observations=observed,
+                        pilot_mask=mask,
+                        num_subcarriers=self.ofdm.num_subcarriers,
+                        num_symbols=self.ofdm.num_symbols,
+                    )
+                # LS gain estimation at (possibly refined) DD positions
                 from .oracle import _ridge_ls, _col_norms, _build_raw_dict
                 n_idx, m_idx = np.nonzero(mask)
                 A_raw = _build_raw_dict(
