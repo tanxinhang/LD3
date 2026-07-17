@@ -45,6 +45,8 @@ from ld3.dd_estimation import (
 )
 from ld3.metrics import nmse_loss, nmse_numpy, nmse_torch
 from ld3.models import (
+    AMMSEEstimator,
+    D2ANEstimator,
     PhysicalResidualEstimator,
     PhysicsGuidedCrossAttention,
     TFOnlyEstimator,
@@ -542,6 +544,14 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_dim_in = 5 + 2 * token_ver  # token_version 1→7 dims, 2→9 dims
         models: dict[str, tuple[torch.nn.Module, str]] = {
             "tf_only": (TFOnlyEstimator(hidden_dim), "none"),
+            "ammse": (
+                AMMSEEstimator(hidden_dim, ofdm.num_subcarriers, ofdm.num_symbols),
+                "none",
+            ),
+            "d2an": (
+                D2ANEstimator(hidden_dim, ofdm.num_subcarriers, ofdm.num_symbols),
+                "none",
+            ),
             "physics_cross_attention": (
                 PhysicsGuidedCrossAttention(
                     hidden_dim=hidden_dim,
