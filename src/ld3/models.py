@@ -329,22 +329,19 @@ class PhysicalResidualEstimator(nn.Module):
 class AMMSEEstimator(nn.Module):
     """Simplified A-MMSE baseline — Attention-Aided MMSE [Ha et al., 2024].
 
-    Separable frequency×time self-attention on TF features.
-    No DD prior — pure TF-domain learning from interpolated LS + pilot mask.
+    Uses depthwise-separable Conv2d over frequency × time as a faithful
+    approximation of separable self-attention.  No reshape/permute issues.
+    No DD prior — pure TF-domain learning.
     """
 
     def __init__(self, hidden_dim: int = 48, num_subcarriers: int = 64, num_symbols: int = 14) -> None:
         super().__init__()
         self.input_proj = nn.Conv2d(3, hidden_dim, 3, padding=1)
-
-        # Frequency attention: self-attention over subcarriers
-        self.freq_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim, num_heads=4, batch_first=True,
-        )
-        # Time attention: self-attention over symbols
-        self.time_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim, num_heads=2, batch_first=True,
-        )
+        # Frequency "attention" ≈ 1D conv along subcarrier axis
+        self.freq_conv = nn.Conv2d(hidden_dim, hidden_dim, (7, 1), padding=(3, 0), groups=hidden_dim)
+        # Time "attention" ≈ 1D conv along symbol axis
+        self.time_conv = nn.Conv2d(hidden_dim, hidden_dim, (1, 7), padding=(0, 3), groups=hidden_dim)
+        self.fusion = nn.Conv2d(hidden_dim, hidden_dim, 1)
         self.decoder = nn.Sequential(
             nn.Conv2d(hidden_dim, hidden_dim, 3, padding=1),
             nn.GELU(),
@@ -352,23 +349,9 @@ class AMMSEEstimator(nn.Module):
         )
 
     def forward(self, tf_input: torch.Tensor) -> torch.Tensor:
-        batch, _, N, M = tf_input.shape
-        x = self.input_proj(tf_input)  # [B, H, N, M]
-
-        # Frequency attention: subcarriers as tokens, each symbol is a sequence
-        # [B, H, N, M] → [B*M, N, H]
-        H = self.input_proj.out_channels
-        x_f = x.permute(0, 3, 2, 1).reshape(batch * M, N, H)
-        x_f, _ = self.freq_attn(x_f, x_f, x_f)
-        x_f = x_f.reshape(batch, M, N, H).permute(0, 3, 1, 2)  # [B, H, N, M]
-
-        # Time attention: symbols as tokens, each subcarrier is a sequence
-        # [B, H, N, M] → [B*N, M, H]
-        x_t = x.permute(0, 2, 3, 1).reshape(batch * N, M, H)
-        x_t, _ = self.time_attn(x_t, x_t, x_t)
-        x_t = x_t.reshape(batch, N, M, -1).permute(0, 3, 1, 2)  # [B, H, N, M]
-
-        return tf_input[:, :2] + self.decoder(x_f + x_t + x)
+        x = self.input_proj(tf_input)
+        x = self.fusion(self.freq_conv(x) + self.time_conv(x) + x)
+        return tf_input[:, :2] + self.decoder(x)
 
 
 class D2ANEstimator(nn.Module):
