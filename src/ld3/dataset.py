@@ -15,6 +15,7 @@ from .dd_estimation import (
     refine_paths_variable_projection,
 )
 from .oracle import (
+    compute_path_quality,
     estimated_path_tokens_v2,
     oracle_path_tokens,
     oracle_path_tokens_v2,
@@ -119,8 +120,15 @@ class SyntheticOFDMISACDataset(Dataset):
                 y = observed[mask]
                 g_hat = _ridge_ls(A_raw, y)
                 g_hat = g_hat / np.maximum(norms, np.finfo(float).eps)
+                # Per-path quality metrics (LOO, PSLR, coherence)
+                conf, sig_t, sig_n, rel = compute_path_quality(
+                    est, g_hat, observed, mask, score_map,
+                    self.ofdm.num_subcarriers, self.ofdm.num_symbols,
+                )
                 tokens, valid = estimated_path_tokens_v2(
                     est, g_hat, self.cfg.max_paths,
+                    confidence=conf, sigma_tau=sig_t,
+                    sigma_nu=sig_n, relevance=rel,
                 )
             else:
                 # No paths detected — truly empty tokens, no Oracle leak

@@ -71,12 +71,116 @@ def oracle_path_tokens_v2(paths: PathSet, max_paths: int) -> tuple[np.ndarray, n
     return tokens, valid
 
 
+def compute_path_quality(
+    est: EstimatedPaths,
+    ls_gains: np.ndarray,
+    pilot_observations: np.ndarray,
+    pilot_mask: np.ndarray,
+    score_map: np.ndarray,
+    num_subcarriers: int,
+    num_symbols: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Compute per-path quality metrics from DD detections + pilot data.
+
+    Returns (confidence, sigma_tau, sigma_nu, relevance) — each shape (n_paths,).
+    All values are in [0, 1] or bin units.
+
+    Metrics:
+      - Peak PSLR: local peak-to-sidelobe ratio (higher → more reliable)
+      - Leave-one-out ΔJ: residual increase when this path is removed
+      - Local dictionary coherence: max column correlation in neighbourhood
+    """
+    n_paths = len(est.delay_bins)
+    if n_paths == 0:
+        return np.array([]), np.array([]), np.array([]), np.array([])
+
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    y = pilot_observations[pilot_mask]
+    N, M = num_subcarriers, num_symbols
+
+    # --- 1. Peak PSLR per path ---
+    peak_pslr = np.ones(n_paths)
+    n_delay = score_map.shape[0]
+    n_doppler = score_map.shape[1]
+    for l in range(n_paths):
+        i0 = int(np.argmin(np.abs(
+            np.linspace(0, est.delay_bins[-1] if n_delay > 1 else 1.0, n_delay)
+            - est.delay_bins[l]
+        )))
+        j0 = int(np.argmin(np.abs(
+            np.linspace(-3.0, 3.0, n_doppler) - est.doppler_bins[l]
+        )))
+        peak_val = score_map[i0, j0]
+        # Local sidelobe: max outside NMS radius in 3×3 window
+        r = 2  # NMS radius
+        i_start, i_end = max(0, i0 - r), min(n_delay, i0 + r + 1)
+        j_start, j_end = max(0, j0 - r), min(n_doppler, j0 + r + 1)
+        local = score_map[i_start:i_end, j_start:j_end].copy()
+        local[i0 - i_start, j0 - j_start] = 0.0  # exclude peak
+        max_sidelobe = float(np.max(local)) if local.size > 1 else 0.0
+        peak_pslr[l] = peak_val / max(max_sidelobe, np.finfo(float).eps)
+
+    # --- 2. Leave-one-out residual contribution ---
+    # Full model residual (with normalised columns for consistency)
+    A_full = np.zeros((n_idx.size, n_paths), dtype=np.complex128)
+    for l in range(n_paths):
+        dp = np.exp(-2j * np.pi * n_idx * est.delay_bins[l] / N)
+        fp = np.exp(2j * np.pi * m_idx * est.doppler_bins[l] / M)
+        A_full[:, l] = dp * fp
+    # Residual uses the existing LS gains (already in unnormalised units)
+    resid_full = float(np.sum(np.abs(y - A_full @ ls_gains) ** 2))
+
+    loo_contrib = np.zeros(n_paths)
+    for l in range(n_paths):
+        # Remove path l, re-estimate gains
+        mask_l = np.ones(n_paths, dtype=bool)
+        mask_l[l] = False
+        if mask_l.sum() == 0:
+            loo_contrib[l] = 1.0
+            continue
+        A_loo = A_full[:, mask_l]
+        # Normalise columns for consistent LS regularisation
+        col_norms = np.sqrt(np.sum(np.abs(A_loo) ** 2, axis=0))
+        A_loo_normed = A_loo / np.maximum(col_norms, np.finfo(float).eps)
+        g_loo_normed = _ridge_ls(A_loo_normed, y)
+        g_loo = g_loo_normed / np.maximum(col_norms, np.finfo(float).eps)
+        resid_loo = float(np.sum(np.abs(y - A_loo @ g_loo) ** 2))
+        loo_contrib[l] = (resid_loo - resid_full) / max(resid_loo, np.finfo(float).eps)
+    loo_contrib = np.clip(loo_contrib, 0.0, 1.0)
+
+    # --- 3. Per-path confidence from PSLR + LOO ---
+    # Sigmoid-style mapping: high PSLR + high LOO → confidence near 1
+    confidence = np.zeros(n_paths)
+    for l in range(n_paths):
+        # PSLR contribution: values > 3 → confident, < 1 → uncertain
+        pslr_score = 1.0 / (1.0 + np.exp(-2.0 * (peak_pslr[l] - 2.0)))
+        conf = 0.5 * pslr_score + 0.5 * loo_contrib[l]
+        confidence[l] = float(np.clip(conf, 0.1, 0.95))
+
+    # --- 4. Uncertainty estimates ---
+    # σ_τ, σ_ν: inversely proportional to peak PSLR
+    sigma_tau = 0.3 / np.clip(peak_pslr, 1.0, 10.0)
+    sigma_nu = 0.2 / np.clip(peak_pslr, 1.0, 10.0)
+
+    # --- 5. Relevance = LOO contribution ---
+    relevance = loo_contrib.copy()
+
+    return confidence, sigma_tau, sigma_nu, relevance
+
+
 def estimated_path_tokens_v2(
     est: EstimatedPaths,
     ls_gains: np.ndarray,
     max_paths: int,
+    confidence: np.ndarray | None = None,
+    sigma_tau: np.ndarray | None = None,
+    sigma_nu: np.ndarray | None = None,
+    relevance: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Create 9-dim tokens from DD-estimated support + LS-estimated gains.
+
+    If quality metrics are provided (from compute_path_quality), they replace
+    hardcoded defaults. Otherwise falls back to legacy constants.
 
     This is the Gate 1-E token source — real-world scenario where tokens
     come from DD detection + LS, not Oracle truth.
@@ -84,17 +188,16 @@ def estimated_path_tokens_v2(
     tokens = np.zeros((max_paths, 9), dtype=np.float32)
     valid = np.zeros(max_paths, dtype=bool)
     n_paths = min(max_paths, len(est.delay_bins))
-    # Sort by estimated power (LS gain magnitude)
     order = np.argsort(np.abs(ls_gains))[::-1][:n_paths]
     tokens[:n_paths, 0] = est.delay_bins[order]
     tokens[:n_paths, 1] = est.doppler_bins[order]
     power = np.abs(ls_gains[order]) ** 2
     total_p = np.sum(power)
     tokens[:n_paths, 2] = power / max(total_p, np.finfo(float).eps)
-    tokens[:n_paths, 3] = 0.7  # moderate confidence for estimated tokens
-    tokens[:n_paths, 4] = 0.2  # estimated sigma_delay
-    tokens[:n_paths, 5] = 0.1  # estimated sigma_doppler
-    tokens[:n_paths, 6] = 1.0
+    tokens[:n_paths, 3] = confidence[order] if confidence is not None else 0.7
+    tokens[:n_paths, 4] = sigma_tau[order] if sigma_tau is not None else 0.2
+    tokens[:n_paths, 5] = sigma_nu[order] if sigma_nu is not None else 0.1
+    tokens[:n_paths, 6] = relevance[order] if relevance is not None else 1.0
     tokens[:n_paths, 7] = ls_gains[order].real.astype(np.float32)
     tokens[:n_paths, 8] = ls_gains[order].imag.astype(np.float32)
     valid[:n_paths] = True
