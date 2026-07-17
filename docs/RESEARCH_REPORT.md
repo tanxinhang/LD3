@@ -74,6 +74,39 @@ Low-density Comb has μ_far = 1 (deterministic DD ambiguity).
 | OS 4×8 | 0.754 | 0.114 | 0.090 | 0.114 |
 | OS 8×16 | 0.754 | 0.099 | 0.083 | 0.096 |
 
+### 2.4 Pilot Density Scan (K=4, SNR=10 dB)
+
+DD+LS NMSE as a function of pilot density. 500 trials per point.
+
+| ρ | Pilots | DD+LS NMSE | Recall | Power Recovery |
+|---|---|---|---|---|
+| 0.03125 | 28 | 0.395 | 0.524 | 0.760 |
+| 0.0625 | 56 | 0.256 | 0.629 | 0.811 |
+| **0.125** | **112** | **0.201** | **0.727** | **0.876** |
+| 0.25 | 224 | 0.175 | 0.759 | 0.872 |
+| 0.5 | 448 | 0.168 | 0.791 | 0.888 |
+
+**Key finding**: ρ=0.125 is the sweet spot. Doubling to ρ=0.25 improves NMSE
+only 13% (0.201→0.175) at 2× pilot overhead. Further increase to ρ=0.5 yields
+marginal gain (0.175→0.168). Below ρ=0.0625, recall drops below 0.63 and NMSE
+degrades rapidly. Power recovery is more robust than recall — dominant paths are
+found even with very few pilots.
+
+### 2.5 Path Count Scan (ρ=0.125, SNR=10 dB)
+
+DD+LS NMSE as K increases. 500 trials per point.
+
+| K | DD+LS NMSE | Recall | Power Recovery |
+|---|---|---|---|
+| 4 | 0.201 | 0.727 | 0.876 |
+| 6 | 0.265 | 0.595 | 0.792 |
+| 8 | 0.305 | 0.523 | 0.750 |
+
+**Key finding**: Recall degrades with K (0.73→0.60→0.52), but power recovery
+stays above 0.75. The DD detector prioritises strong paths and misses weak ones.
+This implies Physical Residual's learned residual has larger potential gain at
+higher K, where DD support quality degrades and residual compensation matters more.
+
 ---
 
 ## 3. Gate 1: Learned Fusion Results
