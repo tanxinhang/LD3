@@ -300,6 +300,37 @@ def refine_paths_quadratic(
     )
 
 
+def _solve_spd_cholesky(A: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Solve Ax = b for a real SPD matrix A using manual Cholesky."""
+    import math
+    n = A.shape[0]
+    L = np.zeros((n, n), dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1):
+            s = float(A[i, j])
+            for k in range(j):
+                s -= L[i, k] * L[j, k]
+            if i == j:
+                if s <= 0.0:
+                    s = np.finfo(np.float64).eps
+                L[i, j] = math.sqrt(s)
+            else:
+                L[i, j] = s / L[j, j]
+    y = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        s = float(b[i])
+        for j in range(i):
+            s -= L[i, j] * y[j]
+        y[i] = s / L[i, i]
+    x = np.zeros(n, dtype=np.float64)
+    for i in range(n - 1, -1, -1):
+        s = y[i]
+        for j in range(i + 1, n):
+            s -= L[j, i] * x[j]
+        x[i] = s / L[i, i]
+    return x
+
+
 def refine_paths_variable_projection(
     est: EstimatedPaths,
     pilot_observations: np.ndarray,
