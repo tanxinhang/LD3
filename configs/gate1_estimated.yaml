@@ -28,6 +28,8 @@ dataset:
   token_version: 2
   token_source: estimated
   token_refine: vp
+  token_vp_rounds: 2
+  token_vp_probes: 4
 training:
   epochs: 50
   batch_size: 64

@@ -35,6 +35,8 @@ class DatasetConfig:
     token_version: int = 1  # 1 = legacy 7-dim, 2 = 9-dim with Re(α), Im(α)
     token_source: str = "oracle"  # "oracle" | "estimated"
     token_refine: str = ""  # "" | "vp" — apply continuous refinement to estimated tokens
+    token_vp_rounds: int = 3  # VP coordinate descent rounds
+    token_vp_probes: int = 8  # VP random probes per path per round
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -100,6 +102,8 @@ class SyntheticOFDMISACDataset(Dataset):
                         pilot_mask=mask,
                         num_subcarriers=self.ofdm.num_subcarriers,
                         num_symbols=self.ofdm.num_symbols,
+                        n_rounds=self.cfg.token_vp_rounds,
+                        n_probes=self.cfg.token_vp_probes,
                     )
                 # LS gain estimation at (possibly refined) DD positions
                 from .oracle import _ridge_ls, _col_norms, _build_raw_dict
