@@ -405,13 +405,13 @@ class D2ANEstimator(nn.Module):
         m = torch.arange(num_symbols, dtype=torch.float32)
 
         # Build basis: [D*F, N*M] real-valued (cos + sin stacked)
-        basis_cos = torch.zeros(self.num_bases, N * M)
-        basis_sin = torch.zeros(self.num_bases, N * M)
+        basis_cos = torch.zeros(self.num_bases, self.N * self.M)
+        basis_sin = torch.zeros(self.num_bases, self.N * self.M)
         for d in range(num_delay):
             for f in range(num_doppler):
                 idx = d * num_doppler + f
-                phase = (-2.0 * torch.pi * n[:, None] * tau[d] / N
-                         + 2.0 * torch.pi * m[None, :] * nu[f] / M)
+                phase = (-2.0 * torch.pi * n[:, None] * tau[d] / self.N
+                         + 2.0 * torch.pi * m[None, :] * nu[f] / self.M)
                 basis_cos[idx] = torch.cos(phase).reshape(-1)
                 basis_sin[idx] = torch.sin(phase).reshape(-1)
         self.register_buffer("basis_cos", basis_cos)  # [D*F, N*M]
