@@ -1,0 +1,39 @@
+# Gate 1 boundary work point: test whether physical support helps under low-quality pilots.
+#
+# Random pilots, density=0.125, SNR=0 dB
+# At this SNR, DD identifiability is marginal → tests robustness of physics prior.
+
+seed: 2036
+device: auto
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 0.0
+  snr_max_db: 0.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2
+  token_source: estimated
+training:
+  epochs: 50
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 3

@@ -85,13 +85,17 @@ def move_batch(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str
 # ---------------------------------------------------------------------------
 
 
-def evaluate_non_learned_baselines(
+def _evaluate_non_learned_with_samples(
     ofdm: OFDMConfig,
     channel: ChannelConfig,
     cfg: DatasetConfig,
     estimator_config: dict[str, Any],
-) -> dict[str, dict[str, float]]:
-    """Evaluate Oracle perfect, Oracle+LS, and DD+LS on a fixed dataset."""
+) -> tuple[dict[str, dict[str, float]], dict[str, np.ndarray]]:
+    """Evaluate Oracle perfect, Oracle+LS, and DD+LS on a fixed dataset.
+
+    Returns (summary_stats, per_sample_nmse_linear) where per_sample contains
+    arrays keyed by method name (e.g. "nmse_estimated_support_ls").
+    """
     rng = np.random.default_rng([cfg.seed, 9999])
     grid = build_dd_grid(
         ofdm.num_subcarriers, ofdm.num_symbols,
@@ -159,12 +163,19 @@ def evaluate_non_learned_baselines(
             "n_samples": len(vals),
         }
 
-    return {
+    per_sample = {
+        "nmse_oracle_perfect": np.array(nmse_perfect_vals),
+        "nmse_oracle_support_ls": np.array(nmse_oracle_support_ls_vals),
+        "nmse_estimated_support_ls": np.array(nmse_estimated_support_ls_vals),
+        "nmse_initial_interpolation": np.array(nmse_initial_vals),
+    }
+    summary = {
         "nmse_oracle_perfect": stats(nmse_perfect_vals),
         "nmse_oracle_support_ls": stats(nmse_oracle_support_ls_vals),
         "nmse_estimated_support_ls": stats(nmse_estimated_support_ls_vals),
         "nmse_initial_interpolation": stats(nmse_initial_vals),
     }
+    return summary, per_sample
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +473,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     # --- Non-learned baselines (run ONCE on fixed test bank) ---
     print("Evaluating non-learned baselines (Gate 1-A, 1-B, 1-C)...")
-    non_learned_test = evaluate_non_learned_baselines(
+    non_learned_test, ddls_per_sample = _evaluate_non_learned_with_samples(
         ofdm, channel, test_cfg_fixed, estimator_cfg
     )
 
@@ -678,6 +689,12 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             hb["residual_vs_tf_only_paired_gain_linear"] = paired_bootstrap_gain(
                 per_seed_tf_nmse, per_seed_residual_nmse,
             )
+            # Paired CI: estimated_residual vs DD+LS (deterministic baseline)
+            ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
+            ddls_replicated = [ddls_arr] * len(per_seed_residual_nmse)
+            hb["residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
+                ddls_replicated, per_seed_residual_nmse,
+            )
         if per_seed_cross_shuffled_nmse:
             hb["cross_attention_shuffled_nmse_linear"] = (
                 hierarchical_bootstrap_seeds(per_seed_cross_shuffled_nmse)
@@ -775,8 +792,11 @@ def main() -> None:
     parser.add_argument("--train-size", type=int, default=None)
     parser.add_argument("--test-size", type=int, default=None)
     parser.add_argument("--num-seeds", type=int, default=None)
+    parser.add_argument("--device", type=str, default=None, help="Force device (cpu/cuda)")
     args = parser.parse_args()
     config = load_config(args.config)
+    if args.device is not None:
+        config["device"] = args.device
     if args.epochs is not None:
         config["training"]["epochs"] = args.epochs
     if args.train_size is not None:
