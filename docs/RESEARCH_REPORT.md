@@ -165,46 +165,69 @@ Model strongly depends on correct DD tokens.
 
 ---
 
-## 4. Literature Comparison (300 Epochs, Same Setting)
+## 4. Literature Comparison (Internal Diagnostic — Not SOTA Benchmark)
+
+**Note:** Results in this section are *LD3-adapted baselines*, not necessarily
+faithful reproductions of the cited methods. A-MMSE and D2AN were re-implemented
+for the LD3 setting (ρ=0.125, 4-path fractional channel, 64×14 grid). The cited
+papers use different channel models, pilot densities, and OFDM configurations.
+These comparisons serve as architectural diagnostics within LD3's experimental
+framework, not as formal SOTA comparisons.
 
 ### 4.1 Compared Methods
 
-| Model | Paper | Paradigm | DD Prior |
-|---|---|---|---|
-| TF-only | — | CNN baseline | None |
-| **A-MMSE** | [Ha et al., IEEE WCL 2024] | Two-stage Transformer attention → learned filter coefficients | None |
-| **D2AN** | [Zhao et al., IEEE WCL 2026] | DD complex-exponential basis → learned attention weights | Indirect (attention bias) |
-| Cross-Attn (9-dim) | LD3 (this work) | DD path-token cross-attention | Direct (token features) |
-| **Physical Residual (estimated)** | **LD3 (this work)** | **DD explicit reconstruction + zero-init residual** | **Direct (H_phys formula)** |
+| Model | Paper | Paradigm | DD Prior | Token Source | Epochs |
+|---|---|---|---|---|---|
+| TF-only | — | CNN baseline | None | — | 300 |
+| **A-MMSE (adapted)** | Ha et al., arXiv:2506.00452 | Two-stage Transformer attention | None | — | 300 |
+| **D2AN (adapted)** | Zhao et al., IEEE WCL 2026 | DD complex-exponential basis → attention | Indirect (attention bias) | — | 300 |
+| Cross-Attn (9-dim) | LD3 | DD path-token cross-attention | Direct (token features) | Oracle | 300 |
+| **DD+LS** | LD3 (non-learned) | DD detection + LS gains | Direct (path parameters) | — | — |
+| **Physical Residual** | LD3 | Explicit H_phys + zero-init residual | Direct (H_phys formula) | **Oracle** | 300 |
 
 ### 4.2 Head-to-Head Results
 
-Same setting: ρ=0.125 pilot density, 4 fractional paths, 12-bin delay, 10 dB SNR, 64×14 OFDM grid. All models trained 300 epochs, 3 seeds.
+Same setting: ρ=0.125, 4 fractional paths, 10 dB SNR, 64×14 grid.
 
-| Model | NMSE (dB) | vs TF-only | Paradigm Category |
+| Model | NMSE (dB) | Token Source | Paradigm |
 |---|---|---|---|
 | TF-only | −4.62 | — | TF interpolation |
-| D2AN [Zhao 2026] | −5.68 | +1.06 dB | TF + DD soft attention |
-| A-MMSE [Ha 2024] | −5.83 | +1.21 dB | TF + Transformer attention |
-| Cross-Attn (DD token) | −11.75 | +7.13 dB | TF + DD path token attention |
-| **Physical Residual (estimated)** | **−20.10** | **+15.48 dB** | **DD explicit reconstruction + residual** |
-| Physical Residual (Oracle) | −21.29 | +16.67 dB | DD explicit (upper bound) |
+| D2AN (adapted) | −5.68 | — | TF + DD soft attention |
+| A-MMSE (adapted) | −5.83 | — | TF + Transformer attention |
+| DD+LS (non-learned) | −8.36 | Estimated | DD explicit, no learning |
+| Cross-Attn (9-dim) | −11.75 | Oracle | TF + DD path token attention |
+| **Physical Residual** | **−20.10** | **Oracle** | **DD explicit + zero-init residual** |
+| **Physical Residual (gate1_estimated)** | **−9.76** | **Estimated (DD+LS)** | **DD explicit + zero-init residual** |
 
-### 4.3 Key Insight
+### 4.3 Attribution of Gains
 
-Under ultra-sparse pilot density (ρ=0.125), TF-domain methods (A-MMSE, D2AN) face an
-information bottleneck around −6 dB. They can only interpolate from 112 pilot points
-to 896 grid points — no network architecture can recover information not present in
-the TF observations.
+The 15+ dB gap between TF-domain methods and Physical Residual (Oracle) is NOT purely
+a network architecture effect. It combines three distinct contributions:
 
-DD-domain explicit reconstruction (LD3) breaks through this ceiling by compressing
-observations into 4 path parameters {τ, ν, α} and reconstructing the full TF grid
-from physical formulas. This is a **paradigm difference** — not a matter of better
-attention or more training.
+| Transition | Δ NMSE | Source |
+|---|---|---|
+| TF-only → DD+LS | +3.74 dB | Explicit DD parameterization prior (Known-K) |
+| DD+LS → Physical Residual (estimated) | **+1.40 dB** | **Learned residual (clean learning gain)** |
+| Physical Residual (estimated) → (Oracle) | +10.34 dB | Token quality (true vs. estimated {τ,ν,α}) |
 
-The gap between Cross-Attn (−11.75 dB) and Physical Residual (−20.10 dB) further
-confirms: using DD information as soft attention bias is better than no DD (−6 dB →
-−12 dB), but still far below explicit H_phys reconstruction (−20+ dB).
+The +1.40 dB from DD+LS to estimated Physical Residual is the most reliable
+measure of the learned fusion architecture's contribution — the rest comes from
+the strong inductive bias of explicit path parameterization and Known-K prior.
+
+### 4.4 Key Insight
+
+Under the tested known-order four-path channel model, implicit TF-domain estimators
+(A-MMSE adapted, D2AN adapted) plateaued near −6 dB. Explicit path-parametric
+reconstruction (DD+LS) already achieves −8.4 dB without any learning. The learned
+residual further improves this to −9.8 dB (estimated tokens) or −20.1 dB (Oracle
+tokens). This demonstrates a **strong inductive-bias advantage** of enforcing the
+sparse physical channel manifold, rather than a universal information-theoretic
+limit for all TF-domain methods.
+
+The result does **not** establish that "no TF-domain method can exceed −6 dB" —
+the DD path parameters themselves are extracted from the same pilot observations,
+proving the information *is* present in the TF data. The advantage comes from the
+**representation**: compressing 896 TF coefficients into ~16 path parameters.
 
 ---
 
