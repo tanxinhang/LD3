@@ -281,12 +281,17 @@ class PhysicalResidualEstimator(nn.Module):
             nn.Sigmoid(),
         )
 
-        # Residual correction
+        # Residual correction — zero-init so training starts at H_phys.
+        # When tokens are perfect (Oracle), the model should output H_phys
+        # unchanged; the residual only corrects imperfections in H_phys.
         self.residual = nn.Sequential(
             nn.Conv2d(hidden_dim + 2, hidden_dim, 3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_dim, 2, 1),
         )
+        # Zero-init final layer → ΔH = 0 at step 0
+        nn.init.zeros_(self.residual[-1].weight)
+        nn.init.zeros_(self.residual[-1].bias)
 
     def forward(
         self,
