@@ -369,14 +369,14 @@ class AMMSEEstimator(nn.Module):
         # [B, H, N, M] → [B*M, N, H]
         x_f = x.permute(0, 3, 2, 1).contiguous().view(batch * M, N, self.hidden_dim)
         x_f, _ = self.freq_attn(x_f, x_f, x_f)
-        x_f = self.freq_norm(x_f + x_f)  # residual + norm
-        x_f = x_f.view(batch, M, N, self.hidden_dim).permute(0, 3, 1, 2)  # [B, H, N, M]
+        x_f = self.freq_norm(x_f)  # norm after attention
+        x_f = x_f.view(batch, M, N, self.hidden_dim).permute(0, 3, 2, 1)  # [B, H, N, M]
 
         # --- Time attention: per-subcarrier, tokens = symbols ---
         # [B, H, N, M] → [B*N, M, H]
         x_t = x.permute(0, 2, 3, 1).contiguous().view(batch * N, M, self.hidden_dim)
         x_t, _ = self.time_attn(x_t, x_t, x_t)
-        x_t = self.time_norm(x_t + x_t)
+        x_t = self.time_norm(x_t)  # norm after attention
         x_t = x_t.view(batch, N, M, self.hidden_dim).permute(0, 3, 1, 2)  # [B, H, N, M]
 
         return tf_input[:, :2] + self.decoder(x_f + x_t + x)
