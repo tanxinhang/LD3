@@ -1,6 +1,6 @@
 # LD3 Research Report — Gate 0 & Gate 1 Final Results
 
-Date: 2026-07-17 (final — all experiments complete, multi-SNR, clean architecture)
+Date: 2026-07-18 (final — literature baselines, 300-epoch convergence, Gitee mirror)
 
 ---
 
@@ -165,7 +165,50 @@ Model strongly depends on correct DD tokens.
 
 ---
 
-## 4. Gate Status
+## 4. Literature Comparison (300 Epochs, Same Setting)
+
+### 4.1 Compared Methods
+
+| Model | Paper | Paradigm | DD Prior |
+|---|---|---|---|
+| TF-only | — | CNN baseline | None |
+| **A-MMSE** | [Ha et al., IEEE WCL 2024] | Two-stage Transformer attention → learned filter coefficients | None |
+| **D2AN** | [Zhao et al., IEEE WCL 2026] | DD complex-exponential basis → learned attention weights | Indirect (attention bias) |
+| Cross-Attn (9-dim) | LD3 (this work) | DD path-token cross-attention | Direct (token features) |
+| **Physical Residual (estimated)** | **LD3 (this work)** | **DD explicit reconstruction + zero-init residual** | **Direct (H_phys formula)** |
+
+### 4.2 Head-to-Head Results
+
+Same setting: ρ=0.125 pilot density, 4 fractional paths, 12-bin delay, 10 dB SNR, 64×14 OFDM grid. All models trained 300 epochs, 3 seeds.
+
+| Model | NMSE (dB) | vs TF-only | Paradigm Category |
+|---|---|---|---|
+| TF-only | −4.62 | — | TF interpolation |
+| D2AN [Zhao 2026] | −5.68 | +1.06 dB | TF + DD soft attention |
+| A-MMSE [Ha 2024] | −5.83 | +1.21 dB | TF + Transformer attention |
+| Cross-Attn (DD token) | −11.75 | +7.13 dB | TF + DD path token attention |
+| **Physical Residual (estimated)** | **−20.10** | **+15.48 dB** | **DD explicit reconstruction + residual** |
+| Physical Residual (Oracle) | −21.29 | +16.67 dB | DD explicit (upper bound) |
+
+### 4.3 Key Insight
+
+Under ultra-sparse pilot density (ρ=0.125), TF-domain methods (A-MMSE, D2AN) face an
+information bottleneck around −6 dB. They can only interpolate from 112 pilot points
+to 896 grid points — no network architecture can recover information not present in
+the TF observations.
+
+DD-domain explicit reconstruction (LD3) breaks through this ceiling by compressing
+observations into 4 path parameters {τ, ν, α} and reconstructing the full TF grid
+from physical formulas. This is a **paradigm difference** — not a matter of better
+attention or more training.
+
+The gap between Cross-Attn (−11.75 dB) and Physical Residual (−20.10 dB) further
+confirms: using DD information as soft attention bias is better than no DD (−6 dB →
+−12 dB), but still far below explicit H_phys reconstruction (−20+ dB).
+
+---
+
+## 5. Gate Status
 
 ```
 Gate 0-A    Known-K DD identifiability ................. PASS
@@ -188,9 +231,9 @@ Gate 3      Full OFDM-ISAC waveform .................... OPEN
 
 ---
 
-## 5. Reproducibility
+## 6. Reproducibility
 
-### 5.1 Key Commands
+### 6.1 Key Commands
 
 ```bash
 # Physical closure
@@ -210,6 +253,9 @@ python experiments/gate1_oracle.py --config configs/gate1_estimated.yaml --outpu
 
 # Gate 1 — Multi-SNR
 python experiments/gate1_oracle.py --config configs/gate1_multisnr.yaml --output-dir results/gate1_multisnr --device cuda
+
+# Gate 1 — Literature baselines (A-MMSE + D2AN + LD3)
+python experiments/gate1_oracle.py --config configs/gate1_main.yaml --output-dir results/gate1_literature --device cuda
 ```
 
 ### 5.2 Config Index
