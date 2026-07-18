@@ -53,10 +53,17 @@ training:
   use_quality_gate: true
   # Gate supervision: teach gate which expert to trust at each (n,m)
   gate_supervision:
-    weight: 0.1              # BCE(g, g_star) weight in total loss
-    temperature: 0.1          # sharpness of oracle target (lower = more binary)
-  # Auxiliary losses: ensure each expert works independently
+    weight: 0.05              # lower weight, let NMSE dominate
+    temperature: 0.1          # sharp oracle targets
+  # Auxiliary losses: keep both experts independently usable
   loss_weights:
     final: 1.0
-    tf_aux: 0.2              # L_tf = NMSE(E_tf, H_true) — keep TF expert healthy
-    physical_aux: 0.0        # physical expert already strong via zero-init
+    tf_aux: 0.2              # prevent TF branch degradation
+    physical_aux: 0.0        # physical expert already strong
+  # Corruption augmentation: gate MUST see bad tokens during training
+  # so it learns when to close. Without this, g_star is always ~0.7-0.9.
+  token_augmentation:
+    enabled: true
+    batch_dropout_prob: 0.15
+    dropped_token_fraction: 0.3
+    batch_shuffle_prob: 0.10
