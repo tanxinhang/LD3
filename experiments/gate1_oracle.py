@@ -338,13 +338,12 @@ def train_model(
                 # Oracle target: g → 1 where physics is better, g → 0 where TF is better
                 g_star = torch.sigmoid((e_tf - e_phys) / gate_sup_temperature)
 
-                # BCE loss: gate learns to predict which expert is better at each pixel
-                eps = 1e-8
-                bce = -(g_star * torch.log(g_map + eps) + (1.0 - g_star) * torch.log(1.0 - g_map + eps))
+                # BCE: clamp gate map for numerical safety (hard fallback → exact 0s)
+                g_safe = g_map.clamp(1e-7, 1.0 - 1e-7)
+                bce = -(g_star * torch.log(g_safe) + (1.0 - g_star) * torch.log(1.0 - g_safe))
                 L_gate = bce.mean()
-
-                loss = loss + gate_sup_weight * L_gate
-                raise RuntimeError(f"non-finite loss at epoch {epoch}")
+                if torch.isfinite(L_gate):
+                    loss = loss + gate_sup_weight * L_gate
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
