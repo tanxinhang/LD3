@@ -485,13 +485,13 @@ H_Tf from the Gate 2-C model.  717 test samples, hyperparameters optimised on
 
 | Method | NMSE (dB) | Params | Trained | Key insight |
 |---|---|---|---|---|
-| H_phys-only | −8.50 | 0 | No | Upper bound of pure physics |
+| H_phys-only | −8.50 | 0 | No | Deployable DD-estimated physics baseline |
 | TF-only (standalone) | −5.06 | CNN | Yes | Lower bound (no DD prior) |
 | Fixed blend (λ=0.80) | **−9.15** | 1 | No | 80% physics + 20% TF |
 | Hard switch | −5.52 | 1 | No | Threshold on |H_phys−H_TF|² |
-| Logistic quality gate | −9.04 | 3 | Light | Same features as Gate 2-C, scalar gate |
+| Logistic quality gate | −9.04 | 3 | Light | 0.11 dB worse than fixed blend (within noise) |
 | Hold-out pilot select | −8.27 | 0 | No | Split pilots, pick min check residual |
-| **Spatial quality gate** | **−10.45** | CNN | Yes | Gate 2-C final architecture |
+| **Spatial quality gate** | **−10.45** | CNN | Yes | Gate 2-C: spatial gate + residual ΔH |
 
 **Key findings:**
 
@@ -500,32 +500,38 @@ H_Tf from the Gate 2-C model.  717 test samples, hyperparameters optimised on
    within 1.30 dB of the full spatial quality gate (−10.45 dB) and
    +4.09 dB over TF-only. The physics branch dominates (80% weight).
 
-2. **Quality features have near-zero scalar value.** Logistic quality gate
-   (3 params) vs Fixed blend (1 param): −9.04 vs −9.15 — a mere 0.11 dB
-   difference. At the scalar level, the three quality features
-   (discrepancy, confidence, uncertainty) add negligible discriminative
-   power. q_mean ≈ 0.80 confirms the model is essentially learning λ=0.80
-   in a more complex way.
+2. **Global quality features provide negligible clean-condition NMSE gain
+   when compressed into a single scalar.** Logistic quality gate (−9.04 dB)
+   is 0.11 dB *worse* than the validation-tuned fixed blend (−9.15 dB).
+   The difference is within noise — at the scalar level, the three quality
+   features add no discriminative power beyond a single blend ratio.
+   q_mean ≈ 0.80 confirms the model is essentially learning λ = 0.80.
+   **Their corruption-detection value must be assessed separately via a
+   full corruption sweep on all mechanism baselines.**
 
-3. **Spatial gating contributes a genuine +1.30 dB.** The gap from Fixed
-   blend (−9.15) to Spatial quality gate (−10.45) isolates the value of
-   per-pixel spatial gating: the gate learns WHERE to trust physics, not
-   just HOW MUCH. This +1.30 dB is the architecture's core contribution.
+3. **Spatial gating + residual ΔH improves +1.30 dB over fixed blend.**
+   The gap from Fixed blend (−9.15, no spatial gate, no residual) to the
+   full model (−10.45, spatial gate + zero-init ΔH) is +1.30 dB.
+   **A gate–residual 2×2 factorial ablation is required to isolate the
+   pure spatial-gating contribution from the residual correction
+   contribution.** The fixed blend is a post-hoc baseline on frozen model
+   branches; an end-to-end fixed-blend model trained from scratch would
+   provide the fairest comparison.
 
 4. **"Clever" non-learned baselines underperform simple blending.** Hard
    switch (−5.52 dB, barely above TF-only) and hold-out pilot selector
-   (−8.27 dB, below H_phys-only) both fail because their binary selection
-   loses information — the optimal answer is almost always a soft blend,
-   not a hard choice.
+   (−8.27 dB, below H_phys-only) fail because binary selection loses
+   information. Also, the hold-out selector splits pilots, reducing the
+   effective estimation budget. **A soft hold-out blend (check-pilot
+   residual as softmax temperature) should be tested before concluding
+   that hold-out verification has no value.**
 
-**Implications for the paper narrative:**
+**Five-layer decomposition:**
 
-The mechanism gradient answers the reviewer question "is the complex
-spatial gate justified?" with a layered yes:
-- Most gain: fusion itself (Fixed blend, −9.15)
-- Small gain: quality features in isolation (Logistic, −9.04)
-- Genuine gain: spatial gating (Spatial, −10.45, +1.30 dB)
-- No gain: hard selection rules lose information
-
-This is a stronger argument than "our CNN beats their CNN" — it shows
-exactly which complexity increment pays for itself.
+| Layer | Transition | Δ NMSE | Mechanism |
+|---|---|---|---|
+| 1 | TF-only → H_phys-only | +3.44 dB | DD physical prior |
+| 2 | H_phys-only → Fixed blend | +0.65 dB | Soft fusion synergy |
+| 3 | Fixed blend → Logistic gate | −0.11 dB | Scalar quality = no clean gain |
+| 4 | Fixed blend → Spatial gate + ΔH | +1.30 dB | Spatial gating + residual (to be split) |
+| 5 | Spatial gate → + Hard fallback | — | Structural null_all safety (±0.18 dB) |

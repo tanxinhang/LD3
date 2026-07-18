@@ -330,3 +330,95 @@ def evaluate_holdout_pilot_selector(
         "mean_check_resid_phys": float(np.mean(check_resid_phys)),
         "mean_check_resid_tf": float(np.mean(check_resid_tf)),
     }
+
+
+# ===========================================================================
+# 5. Soft hold-out blend
+# ===========================================================================
+
+
+def evaluate_soft_holdout_blend(
+    pilot_observations: NDArray,    # [N_samp, N_sc, N_sym] complex
+    pilot_mask: NDArray,            # [N_samp, N_sc, N_sym] bool
+    H_phys: NDArray,                # [N_samp, N_sc, N_sym] complex
+    H_tf: NDArray,                  # [N_samp, N_sc, N_sym] complex
+    H_true: NDArray,                # [N_samp, N_sc, N_sym] complex
+    temperature: float = 1.0,
+    holdout_fraction: float = 0.3,
+    rng_seed: int = 42,
+) -> dict:
+    """Soft blend using hold-out pilot check residuals as softmax logits.
+
+    q = softmax(-J_phys/T, -J_TF/T)[0]  — probability of selecting physics.
+    Ĥ = q·H_phys + (1-q)·H_tf
+
+    This isolates whether hold-out verification has value independent of
+    the hard binary selection that caused hard switch to fail.
+    """
+    rng = np.random.default_rng(rng_seed)
+    n_samp = len(H_true)
+    nmses = np.zeros(n_samp)
+    q_vals = np.zeros(n_samp)
+
+    for i in range(n_samp):
+        n_idx, m_idx = np.nonzero(pilot_mask[i])
+        n_pilots = len(n_idx)
+        if n_pilots < 2:
+            q_vals[i] = 0.5  # no information → equal blend
+            H_est = 0.5 * H_phys[i] + 0.5 * H_tf[i]
+        else:
+            n_check = max(1, int(n_pilots * holdout_fraction))
+            perm = rng.permutation(n_pilots)
+            check_idx = perm[:n_check]
+
+            y = pilot_observations[i, n_idx, m_idx]
+
+            phys_err = float(np.sum(np.abs(
+                y[check_idx] - H_phys[i, n_idx[check_idx], m_idx[check_idx]]
+            ) ** 2))
+            tf_err = float(np.sum(np.abs(
+                y[check_idx] - H_tf[i, n_idx[check_idx], m_idx[check_idx]]
+            ) ** 2))
+
+            # Softmax: exp(-J/T)
+            logit_phys = -phys_err / max(temperature, 1e-8)
+            logit_tf = -tf_err / max(temperature, 1e-8)
+            max_logit = max(logit_phys, logit_tf)
+            exp_phys = math.exp(logit_phys - max_logit)
+            exp_tf = math.exp(logit_tf - max_logit)
+            q_vals[i] = exp_phys / (exp_phys + exp_tf + 1e-30)
+
+            H_est = q_vals[i] * H_phys[i] + (1.0 - q_vals[i]) * H_tf[i]
+
+        nmses[i] = _nmse_linear(H_est, H_true[i])
+
+    return {
+        "nmse_linear": float(np.mean(nmses)),
+        "nmse_db": float(10.0 * math.log10(max(float(np.mean(nmses)), 1e-30))),
+        "nmse_std": float(np.std(nmses, ddof=1)),
+        "q_mean": float(np.mean(q_vals)),
+        "temperature": temperature,
+        "holdout_fraction": holdout_fraction,
+    }
+
+
+def optimise_soft_holdout(
+    H_phys_val: NDArray, H_tf_val: NDArray, H_true_val: NDArray,
+    obs_val: NDArray, mask_val: NDArray,
+    temperatures: list[float] | None = None,
+) -> tuple[float, dict]:
+    """Sweep temperature T on validation set."""
+    if temperatures is None:
+        temperatures = [0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+    best_T = temperatures[0]
+    best_nmse = float("inf")
+    sweep = []
+    for T in temperatures:
+        r = evaluate_soft_holdout_blend(
+            obs_val, mask_val, H_phys_val, H_tf_val, H_true_val, temperature=T,
+        )
+        sweep.append(r)
+        if r["nmse_linear"] < best_nmse:
+            best_nmse = r["nmse_linear"]
+            best_T = T
+    return best_T, {"sweep": sweep, "best_temperature": best_T}

@@ -356,6 +356,8 @@ class PhysicalResidualEstimator(nn.Module):
         path_tokens: torch.Tensor,   # [B, L, 9]  with Re(α), Im(α)
         path_valid: torch.Tensor,    # [B, L]
         return_components: bool = False,
+        ablation_mode: str = "full",  # "full" | "fixed_blend_nores" | "spatial_nores" | "fixed_blend_res"
+        fixed_lam: float = 0.80,      # λ for fixed_blend modes
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch, _, N, M = tf_input.shape
 
@@ -381,10 +383,20 @@ class PhysicalResidualEstimator(nn.Module):
 
         H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
 
+        # --- Gate × Residual 2×2 ablation ---
+        if ablation_mode.startswith("fixed_blend"):
+            lam = fixed_lam
+            H_fused = lam * H_phys + (1.0 - lam) * H_tf
+            g = torch.full_like(g, lam)  # constant gate for diagnostics
+
         # 4. Residual correction
         residual_input = torch.cat([tf_features, H_fused], dim=1)
         delta = self.residual(residual_input)              # [B, 2, N, M]
-        H_out = H_fused + delta
+
+        if ablation_mode.endswith("_nores"):
+            H_out = H_fused  # no residual
+        else:
+            H_out = H_fused + delta
 
         # --- Diagnostics ---
         with torch.no_grad():

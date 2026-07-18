@@ -37,8 +37,10 @@ from ld3.baselines import (
     evaluate_fixed_blend,
     evaluate_hard_switch,
     evaluate_holdout_pilot_selector,
+    evaluate_soft_holdout_blend,
     optimise_fixed_blend,
     optimise_hard_switch,
+    optimise_soft_holdout,
 )
 from ld3.channel import ChannelConfig, OFDMConfig, generate_path_set, synthesize_tf_channel
 from ld3.dataset import DatasetConfig, SyntheticOFDMISACDataset
@@ -300,6 +302,46 @@ def main() -> None:
     print(f"   test NMSE={ho_test['nmse_db']:+.2f} dB  "
           f"phys_sel={ho_test['frac_phys_selected']:.2f}")
 
+    # --- 5. Soft hold-out blend ---
+    print("5. Soft hold-out blend (T sweep on val)...")
+    best_T, sho_info = optimise_soft_holdout(
+        H_phys[val_sl], H_tf[val_sl], H_true[val_sl],
+        obs[val_sl], mask[val_sl],
+    )
+    sho_test = evaluate_soft_holdout_blend(
+        obs[test_sl], mask[test_sl], H_phys[test_sl], H_tf[test_sl], H_true[test_sl],
+        temperature=best_T,
+    )
+    results["soft_holdout_blend"] = {"best_T": best_T, "val": sho_info, "test": sho_test}
+    print(f"   best T={best_T:.4f}  test NMSE={sho_test['nmse_db']:+.2f} dB  "
+          f"q_mean={sho_test['q_mean']:.3f}")
+
+    # --- 6. Gate × Residual 2×2 ablation ---
+    print("\n6. Gate × Residual 2×2 ablation (frozen model, forward-only)...")
+    ablation_modes = {
+        "fixed_blend_nores": ("Fixed λ, no ΔH", "fixed_blend_nores"),
+        "spatial_nores":     ("Spatial gate, no ΔH", "spatial_nores"),
+        "fixed_blend_res":   ("Fixed λ + ΔH", "fixed_blend_res"),
+        "spatial_res":       ("Spatial gate + ΔH", "full"),
+    }
+    ablation_results = {}
+    for key, (label, mode) in ablation_modes.items():
+        nmses = []
+        with torch.no_grad():
+            for idx in range(test_sl.start, test_sl.stop):
+                sample = test_dataset[idx]
+                tf_in = sample["tf_input"].unsqueeze(0).to(device)
+                target = sample["target"].unsqueeze(0).to(device)
+                pt = sample["path_tokens"].unsqueeze(0).to(device)
+                pv = sample["path_valid"].unsqueeze(0).to(device)
+                out, _ = model(tf_in, pt, pv, ablation_mode=mode, fixed_lam=best_lam)
+                nmses.append(float(nmse_torch(out, target).cpu()))
+        nmse_lin = float(np.mean(nmses))
+        nmse_db = _nmse_db(nmse_lin)
+        ablation_results[key] = {"label": label, "nmse_linear": nmse_lin, "nmse_db": nmse_db}
+        print(f"   {label:<25s} NMSE={nmse_db:+.2f} dB")
+    results["gate_residual_ablation"] = ablation_results
+
     # ===================================================================
     # Summary table
     # ===================================================================
@@ -309,15 +351,30 @@ def main() -> None:
     rows = [
         ("H_phys-only", _nmse_db(phys_only_nmse_test), "0 params", "No"),
         ("TF-only (standalone)", results.get("tf_only_nmse_db"), "CNN", "Yes"),
+        ("--- Simple baselines ---", None, "", ""),
         ("Fixed blend", fb_test["nmse_db"], f"lam={best_lam:.2f}", "No"),
         ("Hard switch", hs_test["nmse_db"], f"theta={best_theta:.4f}", "No"),
         ("Logistic quality gate", lqg_test["nmse_db"], "3 params", "Light"),
         ("Hold-out pilot select", ho_test["nmse_db"], "Pilot split", "No"),
+        ("Soft hold-out blend", sho_test["nmse_db"], f"T={best_T:.4f}", "No"),
+        ("--- 2x2 ablation ---", None, "", ""),
+        ("Fixed lam, no ΔH", ablation_results["fixed_blend_nores"]["nmse_db"],
+         f"lam={best_lam:.2f}", "No"),
+        ("Spatial gate, no ΔH", ablation_results["spatial_nores"]["nmse_db"],
+         "CNN gate", "Yes"),
+        ("Fixed lam + ΔH", ablation_results["fixed_blend_res"]["nmse_db"],
+         f"lam={best_lam:.2f}", "No"),
+        ("Spatial gate + ΔH", ablation_results["spatial_res"]["nmse_db"],
+         "CNN gate", "Yes"),
+        ("--- Full model ---", None, "", ""),
         ("**Spatial quality gate**", results["spatial_quality_gate_nmse_db"], "CNN gate", "Yes"),
     ]
     for name, nmse, compl, trained in rows:
-        nmse_str = f"{nmse:+.2f} dB" if isinstance(nmse, (int, float)) else str(nmse)
-        print(f"{name:<28s} {nmse_str:>10s} {compl:>12s} {trained:>8s}")
+        if nmse is None:
+            print(f"{name}")
+        else:
+            nmse_str = f"{nmse:+.2f} dB" if isinstance(nmse, (int, float)) else str(nmse)
+            print(f"{name:<28s} {nmse_str:>10s} {compl:>12s} {trained:>8s}")
 
     # --- Save ---
     out_path = args.output_dir / "baselines_safety.json"

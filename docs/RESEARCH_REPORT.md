@@ -477,23 +477,24 @@ Four baselines using the SAME frozen H_phys and H_Tf from the Gate 2-C model.
 **Key findings:**
 
 1. **Fusion gain = mostly scalar blending.** Fixed blend (λ=0.80, 1 parameter,
-   no training) achieves −9.15 dB — within 1.30 dB of the spatial quality
-   gate. The physics branch dominates at 80% weight.
+   no training) achieves −9.15 dB — within 1.30 dB of the full model
+   (−10.45 dB). The physics branch dominates at 80% weight.
 
-2. **Quality features have near-zero marginal value at scalar level.**
-   Logistic quality gate (−9.04 dB) vs Fixed blend (−9.15 dB) = 0.11 dB
-   difference. The three quality features add negligible discriminative
-   power beyond a single blend ratio.
+2. **Global quality features provide negligible clean-condition gain.**
+   Logistic quality gate (−9.04 dB) is 0.11 dB *worse* than fixed blend
+   (−9.15 dB). The difference is within noise — scalar quality features
+   add no discriminative power beyond a single blend ratio in clean
+   conditions. Corruption-detection value must be assessed separately.
 
-3. **Spatial gating contributes a genuine +1.30 dB.** Isolates the value of
-   per-pixel gating: the gate learns WHERE to trust physics, not just HOW
-   MUCH. This is the architecture's core contribution, confirmed against
-   the simplest possible counterfactual.
+3. **Spatial gating + residual ΔH = +1.30 dB, not pure spatial gating.**
+   The gap from Fixed blend (no spatial gate, no ΔH) to the full model
+   (spatial gate + ΔH) is +1.30 dB. A gate–residual 2×2 factorial
+   ablation is required to isolate the contributions.
 
-4. **"Smart" hard selection rules lose information.** Hard switch (−5.52 dB)
-   and hold-out pilot selector (−8.27 dB) both underperform simple blending.
-   Binary selection discards the soft-blend information that both branches
-   contain.
+4. **Hard selection rules lose information vs soft blending.** Hard switch
+   (−5.52 dB) and hold-out pilot selector (−8.27 dB) underperform fixed
+   blend. A soft hold-out variant should be tested before concluding
+   hold-out verification has no value.
 
 See `docs/GATE2_DESIGN.md` §11.6 for complete analysis and paper narrative
 implications.
