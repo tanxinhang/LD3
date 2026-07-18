@@ -144,10 +144,11 @@ def _quality_features(H_phys: NDArray, H_tf: NDArray,
                       tokens: NDArray, valid: NDArray) -> NDArray:
     """Extract per-sample quality features (same as Gate 2-C quality map).
 
-    Returns [N_samp, 3]: [D_mean, confidence_mean, uncertainty_mean]
+    Returns [N_samp, 4]: [D_mean, confidence_mean, uncertainty_mean, valid_ratio]
     """
     n_samp = len(H_phys)
-    feats = np.zeros((n_samp, 3), dtype=np.float64)
+    L = tokens.shape[1]
+    feats = np.zeros((n_samp, 4), dtype=np.float64)
     for i in range(n_samp):
         # Discrepancy mean
         diff = np.abs(H_phys[i] - H_tf[i]) ** 2
@@ -163,19 +164,20 @@ def _quality_features(H_phys: NDArray, H_tf: NDArray,
             conf_mean = 0.0
             unc_mean = 2.0  # max uncertainty when no valid tokens
 
-        feats[i] = [D_mean, conf_mean, unc_mean]
+        valid_ratio = float(v.sum()) / float(L)
+        feats[i] = [D_mean, conf_mean, unc_mean, valid_ratio]
     return feats
 
 
 class LogisticQualityGate:
     """Scalar logistic regression on quality features → per-sample blend weight.
 
-    q = σ(w0*D + w1*conf + w2*unc + b)
+    q = σ(w0*D + w1*conf + w2*unc + w3*valid + b)
     Ĥ = q·H_phys + (1-q)·H_tf
     """
 
     def __init__(self):
-        self.w = np.zeros(3, dtype=np.float64)
+        self.w = np.zeros(4, dtype=np.float64)
         self.b = 0.0
 
     def _sigmoid(self, z: NDArray) -> NDArray:

@@ -254,21 +254,21 @@ def _build_quality_map(
     path_tokens: torch.Tensor, # [B, L, 9]
     path_valid: torch.Tensor,  # [B, L]
 ) -> torch.Tensor:
-    """Build 3-channel spatial quality map for token-conditioned gating.
+    """Build 4-channel spatial quality map for token-conditioned gating.
 
     Channels:
       0: |H_phys - H_tf|²  — discrepancy map (locally normalized)
       1: mean_token_confidence — expanded to spatial constant
       2: mean_token_uncertainty — sigma_delay + sigma_doppler, expanded
+      3: valid_ratio — fraction of token slots that are valid [0, 1]
 
     The discrepancy channel is the most informative: it tells the gate
     WHERE physics and learned TF disagree, enabling spatial gating.
-    The confidence/uncertainty channels tell the gate WHETHER to trust
-    physics at all — when all tokens are low-confidence, the gate can
-    globally reduce H_phys weight.
+    The valid_ratio channel gives the gate an explicit all-tokens-invalid
+    signal, enabling structural null fallback.
 
-    All channels are normalised to [-1, 1] or [0, 1] range for stable
-    CNN input alongside TF features.
+    All channels are normalised to [-1, 1] range for stable CNN input
+    alongside TF features.
     """
     batch, _, N, M = H_phys.shape
     device = H_phys.device
@@ -296,7 +296,12 @@ def _build_quality_map(
     uncertainty_map = mean_unc[:, None, None, None].expand(batch, 1, N, M)  # [B, 1, N, M]
     uncertainty_map = uncertainty_map - 1.0  # center [0, 2] → [-1, 1]
 
-    return torch.cat([discrepancy, confidence_map, uncertainty_map], dim=1)  # [B, 3, N, M]
+    # --- Channel 3: valid_ratio ---
+    valid_ratio = denom / float(path_tokens.shape[1])  # [B], fraction of valid slots
+    valid_map = valid_ratio[:, None, None, None].expand(batch, 1, N, M)
+    valid_map = valid_map * 2.0 - 1.0  # map [0, 1] → [-1, 1]
+
+    return torch.cat([discrepancy, confidence_map, uncertainty_map, valid_map], dim=1)  # [B, 4, N, M]
 
 
 class PhysicalResidualEstimator(nn.Module):
@@ -304,9 +309,15 @@ class PhysicalResidualEstimator(nn.Module):
 
     H_phys = PhysicalReconstructor(path_tokens)     ← explicit physics
     H_tf   = TFEncoder(tf_input)                     ← learned TF refinement
-    Ĥ = g ⊙ H_phys + (1−g) ⊙ H_tf + ΔH              ← gated fusion
+    Ĥ = g ⊙ H_phys + (1−g) ⊙ H_tf + g ⊙ ΔH          ← coupled gated fusion
 
-    When use_quality_gate=True (Gate 2-C), the gate additionally receives
+    Gate 2-C v2 improvements:
+    - Coupled residual: gate controls both blend AND residual correction.
+      g→0 ⇒ Ĥ = H_tf (clean structural fallback, ΔH suppressed).
+    - Quality map v2: 4 channels (discrepancy, confidence, uncertainty, valid_ratio).
+      valid_ratio gives the gate an explicit all-tokens-invalid signal.
+
+    When use_quality_gate=True, the gate additionally receives
     a 3-channel token-quality map: discrepancy |H_phys-H_tf|², mean token
     confidence, and mean token uncertainty. This lets the gate learn to
     reject the physics branch when token quality is poor.
@@ -332,8 +343,8 @@ class PhysicalResidualEstimator(nn.Module):
         )
 
         # Fusion gate: learns where to trust physics vs TF.
-        # Gate 2-C adds 3 quality channels → H+4 → H+7.
-        gate_in_channels = hidden_dim + 4 + (3 if use_quality_gate else 0)
+        # Gate 2-C v2 adds 4 quality channels → H+4 → H+8.
+        gate_in_channels = hidden_dim + 4 + (4 if use_quality_gate else 0)
         self.gate = nn.Sequential(
             nn.Conv2d(gate_in_channels, hidden_dim // 2, 1),
             nn.GELU(),
@@ -396,7 +407,11 @@ class PhysicalResidualEstimator(nn.Module):
         if ablation_mode.endswith("_nores"):
             H_out = H_fused  # no residual
         else:
-            H_out = H_fused + delta
+            # Coupled residual: gate controls both blend AND correction.
+            # g→0: H_out = H_tf + 0 = H_tf (clean structural fallback)
+            # g→1: H_out = H_phys + delta (full physics + correction)
+            # This prevents residual from contributing when physics is shut off.
+            H_out = H_fused + g * delta
 
         # --- Diagnostics ---
         with torch.no_grad():
