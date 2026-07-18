@@ -312,5 +312,107 @@
     "holdout_fraction": 0.3,
     "mean_check_resid_phys": 7.583399790867539,
     "mean_check_resid_tf": 13.197408428201726
+  },
+  "soft_holdout_blend": {
+    "best_T": 5.0,
+    "val": {
+      "sweep": [
+        {
+          "nmse_linear": 0.15155091383560917,
+          "nmse_db": -8.194414405397382,
+          "nmse_std": 0.07881691072999841,
+          "q_mean": 0.9330909476376821,
+          "temperature": 0.01,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.15108810879107756,
+          "nmse_db": -8.207697149438161,
+          "nmse_std": 0.07818208910920083,
+          "q_mean": 0.9333617023846655,
+          "temperature": 0.05,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.15042142948553652,
+          "nmse_db": -8.226902884494535,
+          "nmse_std": 0.07695046340227864,
+          "q_mean": 0.9339074494830704,
+          "temperature": 0.1,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.14398764699033434,
+          "nmse_db": -8.416747653634784,
+          "nmse_std": 0.06691071153562012,
+          "q_mean": 0.9270656577541712,
+          "temperature": 0.5,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.13781153226243673,
+          "nmse_db": -8.607144385359446,
+          "nmse_std": 0.05869622816802281,
+          "q_mean": 0.9086645606738046,
+          "temperature": 1.0,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.13056467765940324,
+          "nmse_db": -8.841742991135268,
+          "nmse_std": 0.05278578016302314,
+          "q_mean": 0.8569050722077047,
+          "temperature": 2.0,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.12727043927635073,
+          "nmse_db": -8.952724569117436,
+          "nmse_std": 0.04847278810306068,
+          "q_mean": 0.7238765738121793,
+          "temperature": 5.0,
+          "holdout_fraction": 0.3
+        },
+        {
+          "nmse_linear": 0.13586608109069845,
+          "nmse_db": -8.668889511685888,
+          "nmse_std": 0.04491681996862927,
+          "q_mean": 0.6274420481206496,
+          "temperature": 10.0,
+          "holdout_fraction": 0.3
+        }
+      ],
+      "best_temperature": 5.0
+    },
+    "test": {
+      "nmse_linear": 0.12407941718322776,
+      "nmse_db": -9.063002551259682,
+      "nmse_std": 0.04489859053362097,
+      "q_mean": 0.7302406717793162,
+      "temperature": 5.0,
+      "holdout_fraction": 0.3
+    }
+  },
+  "gate_residual_ablation": {
+    "fixed_blend_nores": {
+      "label": "Fixed \u03bb, no \u0394H",
+      "nmse_linear": 0.12154526023955359,
+      "nmse_db": -9.15261972171879
+    },
+    "spatial_nores": {
+      "label": "Spatial gate, no \u0394H",
+      "nmse_linear": 0.13694566720771906,
+      "nmse_db": -8.634517037352918
+    },
+    "fixed_blend_res": {
+      "label": "Fixed \u03bb + \u0394H",
+      "nmse_linear": 0.09626205174597903,
+      "nmse_db": -10.16544885932494
+    },
+    "spatial_res": {
+      "label": "Spatial gate + \u0394H",
+      "nmse_linear": 0.09016373460512281,
+      "nmse_db": -10.449681080000342
+    }
   }
 }
