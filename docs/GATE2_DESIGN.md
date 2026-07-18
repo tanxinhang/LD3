@@ -417,41 +417,62 @@ Clean performance improved +0.93 dB with no extra parameters except the
 **Three key findings:**
 
 1. **Gate becomes a genuine reliability indicator.** Quality gate drops from
-   0.92 (clean) to 0.04 (phase π) and 0.03 (jitter 2.0) — a 20× dynamic range
-   vs. the original gate's 0.64→0.47 (1.4×). The gate can now nearly fully
-   shut off the physics branch when tokens are catastrophically wrong.
+   0.92 (clean) to 0.05 (jitter 2.0, ~19× dynamic range) and 0.16 (phase π,
+   ~5.7×). The original gate had only ~1.4× range (0.64→0.47). The gate can
+   now nearly fully shut off the physics branch for the most severe errors.
 
-2. **Most dangerous failure mode is resolved.** Phase π (total gain sign flip)
-   went from +1.10 dB (actively harmful, worse than no DD prior) to −3.93 dB
-   (still below TF-only but no longer destructive). The 5 dB improvement
-   comes from the gate dropping to 0.16 — only 16% physics mix vs 47% before.
+2. **Phase π no longer catastrophic.** Went from +1.10 dB (actively harmful,
+   worse than no DD prior) to −3.93 dB — a +5.03 dB improvement. However,
+   −3.93 dB is still +0.69 dB worse than the paired TF-only baseline (−4.62 dB
+   in the original audit), so the result meets the "severe corruption zone"
+   criterion (≤+1 dB) but not the strict "no-harm" criterion.
 
-3. **null_all gap reduced but not closed.** Gap vs TF-only narrowed from
-   +1.22 dB to +1.11 dB. The remaining gap (gate = 0.50 at null all) is a
-   sigmoid saturation issue — the quality map's discrepancy channel is
-   low when both H_phys and H_tf are near zero, reducing its discriminative
-   power. Further improvement requires architectural changes (e.g.,
-   quality-conditioned residual strength, or learnable gate temperature).
+3. **null_all gap: DATA NEEDS RECONCILIATION.** Two interpretations exist:
+   - Using the Gate 2-C paired TF-only (−5.48 dB): null_all (−4.37) → gap =
+     **+1.11 dB**. This is a conservative estimate but uses a TF-only trained
+     in the same Gate 2-C run (which may have different seed luck).
+   - Using the original Gate 1-D1 TF-only (−4.62 dB, same test config): gap =
+     **+0.25 dB**, which would actually **PASS** the ±0.3 dB criterion.
+   The unresolved question: which TF-only model is the "correct" safety
+   baseline? The Gate 2-C TF-only (−5.48 dB) is objectively better trained,
+   but this makes the null_all gap look worse through no fault of the quality
+   gate. A paired audit where both old and new models are evaluated against
+   the SAME TF-only is needed to resolve this.
+
+   Gate at null_all = 0.50. This is NOT sigmoid saturation (σ(0) = 0.5 is
+   the sigmoid's maximum-gradient midpoint). It means the quality map's
+   features place the null_all case near the decision boundary (z ≈ 0).
+   The quality map's discrepancy channel |H_phys−H_TF|² is small when both
+   reconstructions are near zero (all tokens invalid), reducing its
+   discriminative power. The fix is an explicit all_tokens_invalid signal,
+   not a temperature parameter.
+
+4. **Residual ΔH is always added unconditionally** — even when g=0, the
+   output is Ĥ = H_TF + ΔH, not pure H_TF. This means the residual can
+   introduce its own error on null_all samples, independent of the gate.
+   The next audit must decompose null_all error into: internal H_TF quality,
+   gating residual, residual ΔH contribution, and standalone TF-only.
 
 **Revised conclusion:**
 
 ```
 Gate 2-C: CONDITIONAL PASS
-  ✅ Gate responds to token quality with 20× dynamic range
-  ✅ Phase π no longer destructive (+1.10 → −3.93 dB, +5 dB)
-  ✅ Clean performance maintained (+0.93 dB over baseline)
-  ⚠️ null_all gap: +1.11 dB (target ±0.3 dB) — sigmoid floor
-  ⚠️ Gate at null_all = 0.50 — still mixing 50% physics
+  ✅ Gate responds to token quality (jitter ~19×, phase ~6× dynamic range)
+  ✅ Phase π no longer catastrophic (+1.10 → −3.93 dB, +5.03 dB)
+  ✅ Clean performance maintained (+0.47 dB matched-audit; +0.93 dB vs prior aggregate)
+  ⚠️ null_all gap: +0.25 to +1.11 dB depending on TF-only baseline — needs reconciliation
+  ⚠️ Gate at null_all = 0.50 — decision boundary, not saturation
+  ⚠️ Residual ΔH unconditionally added even when g=0
 ```
 
 ### 11.5 Updated Priority (post Gate 2-C)
 
 ```
-1. Self-verifying tokens: per-path check residual → quality map v2
-   └── Strongest next lever — gives gate better discriminative signal
-2. Gate 2-C v2: learnable temperature + quality-conditioned residual
-   └── Address sigmoid saturation, allow gate → 0 at null_all
-3. Boundary/Stress K=6/8: validate robustness under difficulty
-4. Corruption-aware training: augment with worst-case perturbations
-5. Unknown-K: after token error handling is proven reliable
+P0: Reconcile null_all baseline (same TF-only for old + new audit)
+P1: Structural hard fallback — v = I[any valid], q = v·σ(z)
+    └── Guarantees Ĥ → H_TF when all tokens invalid
+P2: Null error decomposition — measure H_TF, fused, residual, final
+P3: Quality map v2 — add valid_ratio, all-null flag, check residual
+P4: Corruption-aware training — phase/coherent/bias augmentation
+P5: Boundary/Stress K=6/8 — validate robustness under difficulty
 ```

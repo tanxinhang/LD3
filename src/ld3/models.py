@@ -371,7 +371,15 @@ class PhysicalResidualEstimator(nn.Module):
             gate_input = torch.cat([tf_features, H_phys, H_tf, quality_map], dim=1)
         else:
             gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
-        g = self.gate(gate_input)                          # [B, 1, N, M]
+        g_raw = self.gate(gate_input)                     # [B, 1, N, M]
+
+        # Hard null-fallback: when ALL tokens are invalid, force gate to zero.
+        # This guarantees structural fallback Ĥ → H_TF + ΔH, preventing
+        # the sigmoid decision-boundary issue where σ(0) = 0.5 at null_all.
+        has_any_valid = path_valid.any(dim=1).to(g_raw.dtype)       # [B]
+        has_any_valid = has_any_valid[:, None, None, None]           # [B, 1, 1, 1]
+        g = has_any_valid * g_raw                                    # [B, 1, N, M]
+
         H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
 
         # 4. Residual correction
@@ -379,9 +387,29 @@ class PhysicalResidualEstimator(nn.Module):
         delta = self.residual(residual_input)              # [B, 2, N, M]
         H_out = H_fused + delta
 
+        # --- Null error decomposition diagnostics ---
+        # Per-component power for audit: |H_tf|², |H_fused|², |H_phys|², |delta|²
+        with torch.no_grad():
+            p_tf = H_tf.square().sum(dim=(1, 2, 3))        # [B]
+            p_fused = H_fused.square().sum(dim=(1, 2, 3))  # [B]
+            p_phys = H_phys.square().sum(dim=(1, 2, 3))    # [B]
+            p_delta = delta.square().sum(dim=(1, 2, 3))    # [B]
+            p_out = H_out.square().sum(dim=(1, 2, 3))      # [B]
+            # Fraction of physics contribution that survives gating
+            phys_mix = (g * H_phys).square().sum(dim=(1, 2, 3))  # [B]
+
         diagnostics = {
             "gate_mean": g.mean(),
             "gate": g,
+            # Decomposed power (per-sample mean for audit aggregation)
+            "p_tf_mean": p_tf.mean(),
+            "p_fused_mean": p_fused.mean(),
+            "p_phys_mean": p_phys.mean(),
+            "p_delta_mean": p_delta.mean(),
+            "p_out_mean": p_out.mean(),
+            "phys_mix_mean": phys_mix.mean(),
+            # Null signal: fraction of batch where ALL tokens are invalid
+            "frac_null": 1.0 - has_any_valid.float().mean(),
         }
         return H_out, diagnostics
 

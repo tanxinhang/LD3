@@ -434,18 +434,27 @@ gate1_estimated (K=4, 10 dB, ρ=0.125, 3 seeds × 300 epochs).
 
 **Key findings:**
 
-1. **Gate dynamic range: 1.4× → 20×.** Quality gate drops from 0.92 (clean)
-   to 0.04 (phase π) — genuine reliability semantics. The original gate only
-   went from 0.64 to 0.47.
+1. **Gate dynamic range: 1.4× → ~6–19× depending on error type.** Quality gate
+   drops from 0.92 (clean) to 0.05 (jitter 2.0, ~19×) or 0.16 (phase π, ~5.7×).
+   The original gate only went from 0.64 to 0.47 (~1.4×).
 
-2. **Phase π is no longer destructive.** +1.10 dB → −3.93 dB is a +5.03 dB
-   improvement. The gate shuts to 0.16, preventing active harm from the
-   physics branch.
+2. **Phase π is no longer catastrophic.** +1.10 dB → −3.93 dB is a +5.03 dB
+   improvement. However, −3.93 dB is still +0.69 dB worse than the paired
+   TF-only (−4.62 dB), so it meets the severe-zone criterion (≤+1 dB) but not
+   strict no-harm. The gate shuts to 0.16, preventing active destruction.
 
-3. **null_all gap reduced but not closed:** +1.22 dB → +1.11 dB. Gate at
-   null_all = 0.50 — sigmoid saturation prevents full shutdown. Further
-   improvement requires learnable gate temperature or quality-conditioned
-   residual strength.
+3. **null_all gap: needs reconciliation.** Two interpretations exist:
+   - vs. Gate 2-C paired TF-only (−5.48 dB): gap = +1.11 dB
+   - vs. original Gate 1-D1 TF-only (−4.62 dB): gap = **+0.25 dB** (PASS)
+   The inconsistency arises because TF-only models from different training
+   runs have different performance. A paired audit with a common TF-only
+   baseline is needed. Gate at null_all = 0.50 is NOT sigmoid saturation
+   (σ(0)=0.5 is the maximum-gradient midpoint) — it means the null_all
+   quality features fall on the decision boundary.
+
+4. **Residual ΔH is always added unconditionally** — even when g=0,
+   Ĥ = H_TF + ΔH ≠ pure H_TF, so the residual itself can introduce error
+   on null samples independently of gate behavior.
 
 See `docs/GATE2_DESIGN.md` §11.4–11.5 for complete audit results and
 revised priority ordering.
@@ -480,11 +489,13 @@ Gate 2-A5   Joint jitter (≥0.5 bins) .................... FAIL (≥90% harm)
 Gate 2-A6   Coherent false paths (≥2) ................... FAIL (harm ≥ 16%)
 Gate 2-A7   null_all → TF-only fallback ................. FAIL (+1.22 dB gap)
 Gate 2-C    Quality-conditioned gate .................... CONDITIONAL PASS
-Gate 2-C1   Gate dynamic range (20× vs 1.4×) ............ PASS
-Gate 2-C2   Phase π no longer destructive (+5 dB) ....... PASS
-Gate 2-C3   Clean performance maintained (+0.93 dB) ..... PASS
-Gate 2-C4   null_all → TF-only gap ...................... OPEN (+1.11 dB, target ±0.3)
-Gate 2-C5   Self-verifying tokens (v2 quality map) ...... OPEN
+Gate 2-C1   Gate dynamic range (6–19× per error type) ... PASS
+Gate 2-C2   Phase π no longer catastrophic (+5 dB) ...... CONDITIONAL PASS (+0.69 dB vs TF-only)
+Gate 2-C3   Clean performance maintained ................ PASS (+0.47 paired, +0.93 aggregate)
+Gate 2-C4   null_all → TF-only gap ...................... DATA INCONSISTENT (+0.25 or +1.11 dB)
+Gate 2-C5   Hard null-fallback (v = I[valid]) ........... OPEN
+Gate 2-C6   Null error decomposition .................... OPEN
+Gate 2-C7   Quality map v2 (check residual, all-null) ... OPEN
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```

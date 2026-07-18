@@ -148,6 +148,11 @@ def evaluate_corrupted(
     gate_p50_vals: list[float] = []
     gate_p90_vals: list[float] = []
     h_phys_nmse: list[float] = []   # NMSE of H_phys alone
+    # Null error decomposition accumulators (per-component NMSE vs truth)
+    decomp_tf_nmse: list[float] = []       # internal H_Tf NMSE
+    decomp_fused_nmse: list[float] = []    # H_fused NMSE (after gating)
+    decomp_delta_nmse: list[float] = []    # delta residual NMSE
+    decomp_phys_mix: list[float] = []      # |g * H_phys|² power fraction
 
     for idx in range(n_samples):
         sample = dataset[idx]
@@ -220,6 +225,14 @@ def evaluate_corrupted(
             gate_p50_vals.append(float(np.percentile(gate_map, 50)))
             gate_p90_vals.append(float(np.percentile(gate_map, 90)))
 
+        # Null error decomposition: collect component power diagnostics from model
+        # (aggregated per-condition in result dict below)
+        if "p_tf_mean" in diagnostics:
+            decomp_tf_nmse.append(float(diagnostics["p_tf_mean"].cpu()))
+            decomp_fused_nmse.append(float(diagnostics["p_fused_mean"].cpu()))
+            decomp_delta_nmse.append(float(diagnostics["p_delta_mean"].cpu()))
+            decomp_phys_mix.append(float(diagnostics["phys_mix_mean"].cpu()))
+
         # H_phys NMSE
         if "gate" in diagnostics:
             # H_phys is NOT directly returned; we synthesize it
@@ -281,6 +294,13 @@ def evaluate_corrupted(
             neg_hp_nmse = -10.0 * np.log10(np.clip(hp, 1e-30, None))
             corr = np.corrcoef(gm, neg_hp_nmse)[0, 1]
             result["gate_vs_neg_nmse_hphys_corr"] = float(corr) if np.isfinite(corr) else float("nan")
+
+    # Null error decomposition (component powers from model diagnostics)
+    if decomp_tf_nmse:
+        result["decomp_tf_power_mean"] = float(np.mean(decomp_tf_nmse))
+        result["decomp_fused_power_mean"] = float(np.mean(decomp_fused_nmse))
+        result["decomp_delta_power_mean"] = float(np.mean(decomp_delta_nmse))
+        result["decomp_phys_mix_mean"] = float(np.mean(decomp_phys_mix))
 
     if h_phys_nmse:
         hp = np.array(h_phys_nmse)
