@@ -51,3 +51,12 @@ training:
   num_threads: 4
   num_seeds: 3
   use_quality_gate: true
+  # Gate supervision: teach gate which expert to trust at each (n,m)
+  gate_supervision:
+    weight: 0.1              # BCE(g, g_star) weight in total loss
+    temperature: 0.1          # sharpness of oracle target (lower = more binary)
+  # Auxiliary losses: ensure each expert works independently
+  loss_weights:
+    final: 1.0
+    tf_aux: 0.2              # L_tf = NMSE(E_tf, H_true) — keep TF expert healthy
+    physical_aux: 0.0        # physical expert already strong via zero-init
