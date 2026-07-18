@@ -254,7 +254,9 @@ def main() -> None:
     phys_only_nmse_test = np.mean([nmse_numpy(H_phys[i], H_true[i]) for i in range(test_sl.start, test_sl.stop)])
     results["phys_only_nmse_db"] = _nmse_db(phys_only_nmse_test)
 
-    print(f"  Reference:  TF-only={results.get('tf_only_nmse_db', 'N/A'):>6s}  "
+    tf_db = results.get('tf_only_nmse_db')
+    tf_str = f"{tf_db:+.2f} dB" if tf_db is not None else "N/A"
+    print(f"  Reference:  TF-only={tf_str:>10s}  "
           f"H_phys-only={results['phys_only_nmse_db']:+.2f} dB  "
           f"SpatialGate={results['spatial_quality_gate_nmse_db']:+.2f} dB")
     print()
@@ -306,16 +308,16 @@ def main() -> None:
     print(f"{'-'*75}")
     rows = [
         ("H_phys-only", _nmse_db(phys_only_nmse_test), "0 params", "No"),
-        ("TF-only (standalone)", results.get("tf_only_nmse_db", "N/A"), "CNN", "Yes"),
-        ("Fixed blend", fb_test["nmse_db"], f"λ={best_lam:.2f}", "No"),
-        ("Hard switch", hs_test["nmse_db"], f"θ={best_theta:.4f}", "No"),
+        ("TF-only (standalone)", results.get("tf_only_nmse_db"), "CNN", "Yes"),
+        ("Fixed blend", fb_test["nmse_db"], f"lam={best_lam:.2f}", "No"),
+        ("Hard switch", hs_test["nmse_db"], f"theta={best_theta:.4f}", "No"),
         ("Logistic quality gate", lqg_test["nmse_db"], "3 params", "Light"),
         ("Hold-out pilot select", ho_test["nmse_db"], "Pilot split", "No"),
         ("**Spatial quality gate**", results["spatial_quality_gate_nmse_db"], "CNN gate", "Yes"),
     ]
     for name, nmse, compl, trained in rows:
-        nmse_str = f"{nmse:+.2f} dB" if isinstance(nmse, float) else str(nmse)
-        print(f"{name:<28s} {nmse_str:>8s} {compl:>12s} {trained:>8s}")
+        nmse_str = f"{nmse:+.2f} dB" if isinstance(nmse, (int, float)) else str(nmse)
+        print(f"{name:<28s} {nmse_str:>10s} {compl:>12s} {trained:>8s}")
 
     # --- Save ---
     out_path = args.output_dir / "baselines_safety.json"
