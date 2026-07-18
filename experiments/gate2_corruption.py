@@ -14,6 +14,9 @@ Gate 2-A smoke (minimal first step):
 
 from __future__ import annotations
 
+import os
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+
 import argparse
 import json
 import math
@@ -264,7 +267,7 @@ def evaluate_corrupted(
         result["max_degradation"] = float(np.max(R))
         # AUC: trapezoid over sorted R
         r_sorted = np.sort(R)
-        result["auc_degradation"] = float(np.trapz(r_sorted) / len(r_sorted))
+        result["auc_degradation"] = float(np.trapezoid(r_sorted) / len(r_sorted))
 
     if gate_mean_vals:
         gm = np.array(gate_mean_vals)
