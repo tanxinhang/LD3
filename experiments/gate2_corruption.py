@@ -390,11 +390,14 @@ def main() -> None:
     test_dataset = SyntheticOFDMISACDataset(ofdm, channel, test_cfg)
 
     # --- Load models ---
+    # Detect quality-gate from training config
+    use_quality_gate = bool(training_cfg.get("use_quality_gate", False))
     # Try estimated_residual first, then physics_residual
     model = PhysicalResidualEstimator(
         hidden_dim=hidden_dim,
         num_subcarriers=ofdm.num_subcarriers,
         num_symbols=ofdm.num_symbols,
+        use_quality_gate=use_quality_gate,
     ).to(device)
 
     model_pt = args.model_dir / "estimated_residual_seed0.pt"

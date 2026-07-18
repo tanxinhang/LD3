@@ -489,6 +489,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     }
 
     hidden_dim = int(training["hidden_dim"])
+    use_quality_gate = bool(training.get("use_quality_gate", False))
 
     # --- Per-seed learned model records (for hierarchical bootstrap) ---
     per_seed_tf_nmse: list[np.ndarray] = []
@@ -567,6 +568,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     hidden_dim=hidden_dim,
                     num_subcarriers=ofdm.num_subcarriers,
                     num_symbols=ofdm.num_symbols,
+                    use_quality_gate=use_quality_gate,
                 ),
                 "physical_residual",
             ),
@@ -575,6 +577,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     hidden_dim=hidden_dim,
                     num_subcarriers=ofdm.num_subcarriers,
                     num_symbols=ofdm.num_symbols,
+                    use_quality_gate=use_quality_gate,
                 ),
                 "physical_residual",
             ),

@@ -331,7 +331,86 @@ proving the information *is* present in the TF data. The advantage comes from th
 
 ---
 
-## 5. Gate Status
+## 5. Gate 2-A: Failure Boundary Audit (Frozen Model)
+
+Gate 2-A tests how the clean-trained PhysicalResidualEstimator degrades under
+controlled token corruption, without any retraining. 1024 test samples,
+46 corruption specifications, oracle and estimated token chains.
+Safety baseline: TF-only at −4.62 dB.
+
+### 5.1 Failure Severity Tiers
+
+**☠️ Critical (harm_rate ≥ 90%)**
+
+| Perturbation | Oracle NMSE | Est. NMSE | Harm% | Gate |
+|---|---|---|---|---|
+| phase π (total flip) | **+1.10 dB** | +0.79 dB | 100% | 0.472 |
+| bias_delay 0.5 | −1.43 dB | −1.59 dB | **100%** | 0.554 |
+| jitter 2.0 joint | −1.20 dB | −1.47 dB | 99.5% | 0.550 |
+
+**⚠️ Dangerous (harm_rate 30–90%)**
+
+| Perturbation | Oracle NMSE | Harm% |
+|---|---|---|
+| coherent_false 4 | −3.11 dB | 74.0% |
+| dropout 0.75 | −4.57 dB | 60.6% |
+| mag 2.0 | −4.22 dB | 59.9% |
+
+**✅ Safe (harm_rate < 5%)**
+
+| Perturbation | Oracle NMSE | Harm% | Finding |
+|---|---|---|---|
+| random_false 1/2/4 | **−15.39 dB** | **0.0%** | Null token makes model immune |
+| permute | **−15.39 dB** | **0.0%** | Permutation invariance confirmed |
+| phase π/8 | −9.94 dB | 0.0% | Small phase errors tolerated |
+| mag 0.75–1.25 | −9.3 to −12.7 dB | 0.0% | Minor gain deviation safe |
+
+### 5.2 Three Key Findings
+
+**Finding 1: `null_all` fails to reach TF-only — structural defect.**
+
+```
+null_all:  −3.40 dB  (gate stays at 0.589)
+TF-only:   −4.62 dB  (expected safe fallback)
+Gap:       +1.22 dB  ← GATE 2-A FAIL
+```
+
+Even with all tokens marked invalid, the gate remains at ~0.59, mixing
+nearly 60% of the (now-meaningless) physical reconstruction into the output.
+The spatial gate reads TF features + H_phys + H_Tf, not independent token
+quality — it cannot fully reject the physics branch.
+
+**Finding 2: Random false paths are harmless, coherent false are deadly.**
+
+The model ignores random false tokens (null token mechanism works), but
+coherent false paths near strong true paths degrade NMSE by ~3 dB each.
+This is the DD sidelobe detection error mode — the most realistic threat
+in deployment.
+
+**Finding 3: Gate responds to quality but insufficiently.**
+
+Gate drops from 0.642 (clean) to 0.472 (phase π), confirming it perceives
+token degradation. But even at phase π it retains 47% physics weighting,
+causing +1.10 dB NMSE — worse than not using DD prior at all.
+
+### 5.3 Implications
+
+The Gate 2-A audit identifies three architecture gaps to address in
+Gate 2-C (structural safety fusion):
+
+1. **null_all must reach TF-only parity** (±0.3 dB) — requires the gate to
+   receive explicit token-quality evidence, not just TF features.
+2. **Phase errors are the most dangerous single perturbation** — coherent
+   cancellation from flipped gains causes worse-than-TF-only NMSE.
+3. **The model already survives random false tokens and permutation** —
+   these structural invariants are confirmed and should be preserved.
+
+See `docs/GATE2_DESIGN.md` §11 for the complete result table and revised
+priority ordering.
+
+---
+
+## 6. Gate Status
 
 ```
 Gate 0-A    Known-K DD identifiability ................. PASS
@@ -350,15 +429,24 @@ Gate 1-E4   K-sweep (K=6 estimated tokens) ............. PASS (+1.86 dB vs DD+LS
 Gate 1-E5   K-sweep (K=8 estimated tokens) ............. PASS (+1.86 dB vs DD+LS)
 Gate 1-F    Per-path gate .............................. FAIL (−1.0 dB regression)
 
-Gate 2      Safe degradation under corrupted priors .... OPEN
+Gate 2-A    Failure boundary audit (frozen model) ....... COMPLETE (see §5)
+Gate 2-A1   Random false paths .......................... PASS (0.0% harm, null token immune)
+Gate 2-A2   Permutation invariance ...................... PASS (0.0% harm)
+Gate 2-A3   Small perturbation (jitter ≤0.1, phase ≤π/8) PASS (harm < 5%)
+Gate 2-A4   Phase errors (≥π/2) ......................... FAIL (100% harm, NMSE > TF-only)
+Gate 2-A5   Joint jitter (≥0.5 bins) .................... FAIL (≥90% harm)
+Gate 2-A6   Coherent false paths (≥2) ................... FAIL (harm ≥ 16%)
+Gate 2-A7   null_all → TF-only fallback ................. FAIL (+1.22 dB gap)
+Gate 2-C    Structural safety fusion .................... OPEN
+
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```
 
 ---
 
-## 6. Reproducibility
+## 7. Reproducibility
 
-### 6.1 Key Commands
+### 7.1 Key Commands
 
 ```bash
 # Physical closure
@@ -385,9 +473,13 @@ python experiments/gate1_oracle.py --config configs/gate1_main.yaml --output-dir
 # Gate 1 — K-sweep (estimated tokens)
 python experiments/gate1_oracle.py --config configs/gate1_K6_estimated.yaml --output-dir results/gate1_K6 --device cuda
 python experiments/gate1_oracle.py --config configs/gate1_K8_estimated.yaml --output-dir results/gate1_K8 --device cuda
+
+# Gate 2-A — Failure boundary audit (frozen model, no training)
+python experiments/gate2_corruption.py --model-dir results/gate1_estimated --output-dir results/gate2_corruption --samples 200 --device cpu --smoke-only
+python experiments/gate2_corruption.py --model-dir results/gate1_estimated --output-dir results/gate2_corruption --samples 1024 --device cuda
 ```
 
-### 5.2 Config Index
+### 7.2 Config Index
 
 | Config | Purpose |
 |---|---|
@@ -401,7 +493,7 @@ python experiments/gate1_oracle.py --config configs/gate1_K8_estimated.yaml --ou
 | `configs/gate1_K6_estimated.yaml` | Estimated tokens, K=6 paths |
 | `configs/gate1_K8_estimated.yaml` | Estimated tokens, K=8 paths |
 
-### 5.3 RNG Seeding
+### 7.3 RNG Seeding
 
 ```
 Channel RNG:  [seed, density_idx, snr_idx, trial, 100]  — no pattern_index
