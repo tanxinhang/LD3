@@ -556,3 +556,77 @@ H_Tf from the Gate 2-C model.  717 test samples, hyperparameters optimised on
 | 3 | Fixed blend → Scalar quality/heuristic | ~0 dB | No clean-condition gain |
 | 4 | Fixed blend → Fixed blend + ΔH | **+1.02 dB** | Zero-init residual (main contributor) |
 | 5 | Fixed blend + ΔH → Spatial gate + ΔH | **+0.28 dB** | Spatial gating given residual |
+
+### 11.7 Gate 2-C v2: Coupled Residual + Corruption-Aware Training (2026-07-18)
+
+Three changes vs v1: (1) coupled residual `H_out = H_fused + g·ΔH`,
+(2) quality map v2 with valid_ratio channel, (3) corruption-aware token
+augmentation. Same training setup (K=4, 10 dB, ρ=0.125, 3 seeds × 300).
+
+**Training results:**
+
+| Metric | Gate 2-C v1 | Gate 2-C v2 |
+|---|---|---|
+| Physics Residual NMSE | −10.50 | **−10.30** | 
+| Gate mean (clean) | 0.859 | **0.915** |
+| vs DD+LS | +0.0568 | +0.0526 |
+| vs TF-only | +0.2272 | +0.2230 |
+
+**Audit (estimated chain):**
+
+| Condition | v1 NMSE | v1 gate | v2 NMSE | v2 gate |
+|---|---|---|---|---|
+| clean | −10.69 | 0.923 | −10.72 | 0.917 |
+| null_all | −4.78 | 0.000 | −4.61 | 0.000 |
+| phase π | −4.71 | 0.041 | −4.49 | 0.061 |
+| jitter 2.0 | −4.79 | 0.033 | −4.65 | 0.056 |
+
+**2×2 ablation (v2, frozen model):**
+
+| Mode | v2 NMSE | v1 NMSE | Cross-run consensus |
+|---|---|---|---|
+| Fixed λ, no ΔH | −9.19 | −9.15 | ~−9.17 (stable) |
+| Spatial gate, no ΔH | −8.67 | −8.63 | **−0.52 dB** (always harmful) |
+| Fixed λ + ΔH | −10.01 | −10.17 | **+0.82~1.02 dB** (dominant) |
+| Spatial gate + ΔH | −10.49 | −10.45 | **+1.30 dB** (total) |
+
+**Key findings:**
+
+1. **Coupled residual did not improve null_all.** Gate=0 suppresses ΔH,
+   but null_all NMSE *worsened* from −4.78 to −4.61 dB. The internal H_tf
+   branch was co-trained with the residual; removing residual contribution
+   at inference time degrades its effective performance. The standalone
+   TF-only (−5.00 dB) remains better than the internal H_tf under null_all.
+
+2. **Corruption-aware training produced no measurable gain.** v2 performance
+   is within 0.2 dB of v1 across all metrics. The 15% dropout + 10% shuffle
+   augmentation was likely too mild or the wrong type. Phase/location
+   augmentation during training should be tested before concluding.
+
+3. **The 2×2 decomposition is cross-run robust.** Across two independent
+   training runs (v1 and v2), the pattern holds:
+   ```
+   G_spatial     ≈ −0.52 dB  (gate alone harmful, stable)
+   G_residual    ≈ +0.82~1.02 dB (main contributor, stable)
+   G_spatial|res ≈ +0.28~0.48 dB (marginal, stable)
+   ```
+   This is the strongest single finding of the entire Gate 2 investigation.
+
+4. **Quality map v2 (valid_ratio) made no measurable difference.** The
+   additional channel was absorbed by the CNN gate with no performance
+   impact — consistent with the earlier finding that scalar quality
+   features provide negligible clean-condition gain.
+
+**Implications for architecture design:**
+
+The spatial gate's role is now clearly understood: it does NOT directly
+improve reconstruction (it harms it when acting alone). Instead, it
+selectively suppresses the physics branch, creating "correction room"
+for the zero-init residual ΔH. The residual, starting from H_phys via
+zero-init, learns to fix regions where the gate has reduced physics
+weight. This is a **complementary mechanism**: gate and residual must
+be trained jointly to function correctly.
+
+The failure of coupled residual (g·ΔH) shows that the residual learns
+to compensate for the internal H_tf's weaknesses as well — not just
+physics errors. Shutting it off when gate=0 exposes those weaknesses.

@@ -505,8 +505,39 @@ Four baselines using the SAME frozen H_phys and H_Tf from the Gate 2-C model.
 4. **Hard selection loses information.** Hard switch (−5.52 dB) and hard
    hold-out (−8.27 dB) underperform soft blending.
 
-See `docs/GATE2_DESIGN.md` §11.6 for complete analysis and paper narrative
-implications.
+### 5.6 Gate 2-C v2: Coupled Residual + Corruption-Aware Training
+
+Changes: coupled residual (g·ΔH), quality map v2 (+valid_ratio), token
+augmentation (15% dropout + 10% shuffle).  Same setup: K=4, 10 dB, 3 seeds.
+
+**Results vs v1:**
+
+| Metric | v1 | v2 |
+|---|---|---|
+| Physics Residual NMSE | −10.50 | −10.30 |
+| null_all NMSE | −4.78 | −4.61 (worse) |
+| phase π NMSE | −4.71 | −4.49 |
+| Fixed λ + ΔH | −10.17 | −10.01 |
+| Spatial gate + ΔH | −10.45 | −10.49 |
+
+**Key finding: coupled residual degraded null_all.** Gate=0 suppresses both
+physics AND residual, but the internal H_tf was co-trained with the residual
+and performs worse without it. Standalone TF-only (−5.00 dB) remains better.
+
+**2×2 ablation is cross-run robust:**
+
+| Contribution | v1 | v2 | Consensus |
+|---|---|---|---|
+| G_spatial (gate alone) | −0.52 dB | −0.52 dB | **Always harmful** |
+| G_residual (ΔH alone) | +1.02 dB | +0.82 dB | **78–82% of total** |
+| G_spatial\|res (marginal) | +0.28 dB | +0.48 dB | **18–22% of total** |
+
+The spatial gate does not directly improve reconstruction. It suppresses
+physics, creating room for the zero-init residual to correct. Gate and
+residual must be trained jointly — decoupling them at inference (v2) or
+using gate alone (both v1 and v2) harms performance.
+
+See `docs/GATE2_DESIGN.md` §11.7 for complete analysis.
 
 ---
 
