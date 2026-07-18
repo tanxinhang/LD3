@@ -255,6 +255,10 @@ def train_model(
     is_cross: bool,
     val_loader: DataLoader | None = None,
     model_type: str = "none",
+    aug_enabled: bool = False,
+    aug_batch_dropout_prob: float = 0.0,
+    aug_dropped_token_fraction: float = 0.3,
+    aug_batch_shuffle_prob: float = 0.0,
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
@@ -279,26 +283,26 @@ def train_model(
             batch = move_batch(batch, device)
             optimizer.zero_grad(set_to_none=True)
             if is_cross:
-                # --- Token augmentation (train-time only) ---
+                # --- Token augmentation (config-driven, disabled by default) ---
                 pt = batch["path_tokens"]
                 pv = batch["path_valid"]
-                # Token dropout: randomly invalidate 10% of valid tokens
-                if torch.rand(1).item() < 0.1:
-                    valid_mask = pv.clone()
-                    valid_idx = torch.nonzero(valid_mask, as_tuple=False)
-                    if valid_idx.shape[0] > 0:
-                        drop_idx = valid_idx[
-                            torch.randperm(valid_idx.shape[0])[
-                                :max(1, int(0.3 * valid_idx.shape[0]))
+                if aug_enabled:
+                    # Token dropout: randomly invalidate a fraction of valid tokens
+                    if aug_batch_dropout_prob > 0 and torch.rand(1).item() < aug_batch_dropout_prob:
+                        valid_mask = pv.clone()
+                        valid_idx = torch.nonzero(valid_mask, as_tuple=False)
+                        if valid_idx.shape[0] > 0:
+                            n_drop = max(1, int(aug_dropped_token_fraction * valid_idx.shape[0]))
+                            drop_idx = valid_idx[
+                                torch.randperm(valid_idx.shape[0])[:n_drop]
                             ]
-                        ]
-                        pv = pv.clone()
-                        pv[drop_idx[:, 0], drop_idx[:, 1]] = False
-                # Token shuffle: randomise token-sample assignment in 10% of batches
-                if torch.rand(1).item() < 0.1:
-                    perm = torch.randperm(pt.shape[0], device=device)
-                    pt = pt[perm]
-                    pv = pv[perm]
+                            pv = pv.clone()
+                            pv[drop_idx[:, 0], drop_idx[:, 1]] = False
+                    # Token shuffle: randomise token-sample assignment
+                    if aug_batch_shuffle_prob > 0 and torch.rand(1).item() < aug_batch_shuffle_prob:
+                        perm = torch.randperm(pt.shape[0], device=device)
+                        pt = pt[perm]
+                        pv = pv[perm]
 
                 output, diagnostics = model(batch["tf_input"], pt, pv)
             else:
@@ -490,15 +494,17 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     hidden_dim = int(training["hidden_dim"])
     use_quality_gate = bool(training.get("use_quality_gate", False))
+    aug_cfg = training.get("token_augmentation", {})
+    aug_enabled = bool(aug_cfg.get("enabled", False))
+    aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
+    aug_dropped_token_fraction = float(aug_cfg.get("dropped_token_fraction", 0.3))
+    aug_batch_shuffle_prob = float(aug_cfg.get("batch_shuffle_prob", 0.0))
 
-    # --- Per-seed learned model records (for hierarchical bootstrap) ---
-    per_seed_tf_nmse: list[np.ndarray] = []
-    per_seed_cross_nmse: list[np.ndarray] = []
-    per_seed_residual_nmse: list[np.ndarray] = []
-    per_seed_estimated_residual_nmse: list[np.ndarray] = []
-    per_seed_estimated_residual_gate: list[float] = []
-    per_seed_cross_shuffled_nmse: list[np.ndarray] = []
-    per_seed_cross_null_nmse: list[np.ndarray] = []
+    # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
+    per_seed_nmse: dict[str, list[np.ndarray]] = {}
+    per_seed_gate: dict[str, list[float]] = {}
+    per_seed_shuffled_nmse: dict[str, list[np.ndarray]] = {}
+    per_seed_null_nmse: dict[str, list[np.ndarray]] = {}
 
     for seed_idx in range(num_seeds):
         run_seed = base_seed + seed_idx * 1000
@@ -543,15 +549,16 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
         token_ver = int(data_cfg.get("token_version", 1))
         token_dim_in = 5 + 2 * token_ver  # token_version 1→7 dims, 2→9 dims
-        models: dict[str, tuple[torch.nn.Module, str]] = {
-            "tf_only": (TFOnlyEstimator(hidden_dim), "none"),
+        # Model group: "tf_baseline" | "dd_attention" | "physical_residual"
+        models: dict[str, tuple[torch.nn.Module, str, str]] = {
+            "tf_only": (TFOnlyEstimator(hidden_dim), "none", "tf_baseline"),
             "ammse": (
                 AMMSEEstimator(hidden_dim, ofdm.num_subcarriers, ofdm.num_symbols),
-                "none",
+                "none", "tf_baseline",
             ),
             "d2an": (
                 D2ANEstimator(hidden_dim, ofdm.num_subcarriers, ofdm.num_symbols),
-                "none",
+                "none", "tf_baseline",
             ),
             "physics_cross_attention": (
                 PhysicsGuidedCrossAttention(
@@ -561,7 +568,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     max_delay_bins=channel.max_delay_bins,
                     max_abs_doppler_bins=channel.max_abs_doppler_bins,
                 ),
-                "legacy_cross",
+                "legacy_cross", "dd_attention",
             ),
             "physics_residual": (
                 PhysicalResidualEstimator(
@@ -570,21 +577,19 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     num_symbols=ofdm.num_symbols,
                     use_quality_gate=use_quality_gate,
                 ),
-                "physical_residual",
-            ),
-            "estimated_residual": (
-                PhysicalResidualEstimator(
-                    hidden_dim=hidden_dim,
-                    num_subcarriers=ofdm.num_subcarriers,
-                    num_symbols=ofdm.num_symbols,
-                    use_quality_gate=use_quality_gate,
-                ),
-                "physical_residual",
+                "physical_residual", "physical_residual",
             ),
         }
 
+        # Init per-model accumulators on first seed
+        for name in models:
+            if name not in per_seed_nmse:
+                per_seed_nmse[name] = []
+            if name not in per_seed_gate:
+                per_seed_gate[name] = []
+
         seed_results: dict[str, Any] = {}
-        for name, (model, model_type) in models.items():
+        for name, (model, model_type, model_group) in models.items():
             uses_tokens = model_type in ("legacy_cross", "physical_residual")
             is_physical = model_type == "physical_residual"
             print(f"\nTraining {name} on {device}")
@@ -598,6 +603,10 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 is_cross=uses_tokens,
                 val_loader=val_loader,
                 model_type=model_type,
+                aug_enabled=aug_enabled,
+                aug_batch_dropout_prob=aug_batch_dropout_prob,
+                aug_dropped_token_fraction=aug_dropped_token_fraction,
+                aug_batch_shuffle_prob=aug_batch_shuffle_prob,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)
@@ -637,8 +646,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 evaluations["null"] = eval_null
 
                 # Collect per-sample NMSE for shuffled/null
-                shuffled_nmse: list[float] = []
-                null_nmse: list[float] = []
+                shuffled_nmse_list: list[float] = []
+                null_nmse_list: list[float] = []
                 with torch.no_grad():
                     for batch in test_loader:
                         batch = move_batch(batch, device)
@@ -652,38 +661,37 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                         else:
                             pt_s, pv_s = pt, pv
                         out_s, _ = model(batch["tf_input"], pt_s, pv_s)
-                        shuffled_nmse.extend(
+                        shuffled_nmse_list.extend(
                             nmse_torch(out_s, batch["target"]).cpu().numpy().tolist()
                         )
                         # null
                         pv_n = torch.zeros_like(pv)
                         out_n, _ = model(batch["tf_input"], pt, pv_n)
-                        null_nmse.extend(
+                        null_nmse_list.extend(
                             nmse_torch(out_n, batch["target"]).cpu().numpy().tolist()
                         )
-                per_seed_cross_shuffled_nmse.append(np.array(shuffled_nmse))
-                per_seed_cross_null_nmse.append(np.array(null_nmse))
+                if name not in per_seed_shuffled_nmse:
+                    per_seed_shuffled_nmse[name] = []
+                if name not in per_seed_null_nmse:
+                    per_seed_null_nmse[name] = []
+                per_seed_shuffled_nmse[name].append(np.array(shuffled_nmse_list))
+                per_seed_null_nmse[name].append(np.array(null_nmse_list))
 
-            if model_type == "none":
-                per_seed_tf_nmse.append(sample_nmse_arr)
-            elif model_type == "legacy_cross":
-                per_seed_cross_nmse.append(sample_nmse_arr)
-            elif model_type == "physical_residual":
-                per_seed_residual_nmse.append(sample_nmse_arr)
-                # Separate estimated_residual for paired CI vs DD+LS
-                if name == "estimated_residual":
-                    per_seed_estimated_residual_nmse.append(sample_nmse_arr)
-                    # Record per-sample gate mean for auditing
-                    model.eval()
-                    gate_vals = []
-                    with torch.no_grad():
-                        for batch in test_loader:
-                            batch = move_batch(batch, device)
-                            _, diag = model(
-                                batch["tf_input"], batch["path_tokens"], batch["path_valid"]
-                            )
-                            gate_vals.append(float(diag["gate_mean"].cpu()))
-                    per_seed_estimated_residual_gate.append(float(np.mean(gate_vals)))
+            # Record per-sample NMSE keyed by model NAME (not model_type)
+            per_seed_nmse[name].append(sample_nmse_arr)
+
+            # Record gate mean for physical_residual models
+            if is_physical:
+                model.eval()
+                gate_vals = []
+                with torch.no_grad():
+                    for batch in test_loader:
+                        batch = move_batch(batch, device)
+                        _, diag = model(
+                            batch["tf_input"], batch["path_tokens"], batch["path_valid"]
+                        )
+                        gate_vals.append(float(diag["gate_mean"].cpu()))
+                per_seed_gate[name].append(float(np.mean(gate_vals)))
 
             seed_results[name] = {
                 "history": history,
@@ -708,52 +716,70 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         all_results["seeds"][f"seed_{run_seed}"] = seed_results
 
     # --- Hierarchical bootstrap across seeds (paired resampling) ---
-    if num_seeds > 1 and per_seed_tf_nmse and per_seed_cross_nmse:
-        hb = {
-            "tf_only_nmse_linear": hierarchical_bootstrap_seeds(per_seed_tf_nmse),
-            "cross_attention_nmse_linear": hierarchical_bootstrap_seeds(per_seed_cross_nmse),
-            "cross_vs_tf_only_paired_gain_linear": paired_bootstrap_gain(
-                per_seed_tf_nmse, per_seed_cross_nmse,
-            ),
-        }
-        if per_seed_residual_nmse:
-            hb["physical_residual_nmse_linear"] = hierarchical_bootstrap_seeds(
-                per_seed_residual_nmse
-            )
+    if num_seeds > 1:
+        hb: dict[str, Any] = {}
+
+        # Per-model bootstrap (clean)
+        for name in per_seed_nmse:
+            if len(per_seed_nmse[name]) >= 2:
+                hb[f"{name}_nmse_linear"] = hierarchical_bootstrap_seeds(
+                    per_seed_nmse[name]
+                )
+
+        # Paired: physics_residual vs TF-only
+        if ("tf_only" in per_seed_nmse and "physics_residual" in per_seed_nmse
+                and len(per_seed_nmse["tf_only"]) >= 2
+                and len(per_seed_nmse["physics_residual"]) >= 2):
             hb["residual_vs_tf_only_paired_gain_linear"] = paired_bootstrap_gain(
-                per_seed_tf_nmse, per_seed_residual_nmse,
+                per_seed_nmse["tf_only"], per_seed_nmse["physics_residual"],
             )
-            # Paired CI: estimated_residual vs DD+LS
-            if per_seed_estimated_residual_nmse:
-                ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
-                ddls_replicated = [ddls_arr] * len(per_seed_estimated_residual_nmse)
-                hb["estimated_residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
-                    ddls_replicated, per_seed_estimated_residual_nmse,
+
+        # Paired: cross_attention vs TF-only
+        if ("tf_only" in per_seed_nmse and "physics_cross_attention" in per_seed_nmse
+                and len(per_seed_nmse["tf_only"]) >= 2
+                and len(per_seed_nmse["physics_cross_attention"]) >= 2):
+            hb["cross_vs_tf_only_paired_gain_linear"] = paired_bootstrap_gain(
+                per_seed_nmse["tf_only"], per_seed_nmse["physics_cross_attention"],
+            )
+
+        # Paired: physics_residual vs DD+LS
+        if ("physics_residual" in per_seed_nmse
+                and len(per_seed_nmse["physics_residual"]) >= 2):
+            ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
+            ddls_replicated = [ddls_arr] * len(per_seed_nmse["physics_residual"])
+            hb["physical_residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
+                ddls_replicated, per_seed_nmse["physics_residual"],
+            )
+
+        # Gate mean for physics_residual
+        if "physics_residual" in per_seed_gate and per_seed_gate["physics_residual"]:
+            hb["physical_residual_gate_mean"] = float(
+                np.mean(per_seed_gate["physics_residual"])
+            )
+
+        # Shuffled / null for cross_attention
+        if "physics_cross_attention" in per_seed_shuffled_nmse:
+            sn = per_seed_shuffled_nmse["physics_cross_attention"]
+            if len(sn) >= 2:
+                hb["cross_attention_shuffled_nmse_linear"] = (
+                    hierarchical_bootstrap_seeds(sn)
                 )
-                hb["estimated_residual_nmse_linear"] = hierarchical_bootstrap_seeds(
-                    per_seed_estimated_residual_nmse
+        if "physics_cross_attention" in per_seed_null_nmse:
+            nn = per_seed_null_nmse["physics_cross_attention"]
+            if len(nn) >= 2:
+                hb["cross_attention_null_nmse_linear"] = (
+                    hierarchical_bootstrap_seeds(nn)
                 )
-                if per_seed_estimated_residual_gate:
-                    hb["estimated_residual_gate_mean"] = float(
-                        np.mean(per_seed_estimated_residual_gate)
-                    )
-        if per_seed_cross_shuffled_nmse:
-            hb["cross_attention_shuffled_nmse_linear"] = (
-                hierarchical_bootstrap_seeds(per_seed_cross_shuffled_nmse)
-            )
-            hb["cross_attention_null_nmse_linear"] = (
-                hierarchical_bootstrap_seeds(per_seed_cross_null_nmse)
-            )
+
         all_results["hierarchical_bootstrap"] = hb
 
-    # --- Per-SNR evaluation (for multi-SNR models) ---
+    # --- Per-SNR evaluation: ALL seeds, per-model mean+CI ---
     snr_min = float(data_cfg["snr_min_db"])
     snr_max = float(data_cfg["snr_max_db"])
     if abs(snr_max - snr_min) > 0.1:
         snr_points = [-5, 0, 5, 10, 15, 20]
         per_snr_results: dict[str, dict[str, Any]] = {}
-        # Use the LAST seed's models for evaluation
-        print("\n--- Per-SNR evaluation ---")
+        print("\n--- Per-SNR evaluation (all seeds) ---")
         for snr_val in snr_points:
             snr_cfg = DatasetConfig(
                 size=int(data_cfg["test_size"]),
@@ -771,36 +797,53 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             snr_nl, _ = _evaluate_non_learned_with_samples(
                 ofdm, channel, snr_cfg, estimator_cfg
             )
-            snr_info: dict[str, dict] = {"non_learned": snr_nl}
-            # Evaluate trained models on this SNR
+            snr_info: dict[str, Any] = {"non_learned": snr_nl}
             snr_set = SyntheticOFDMISACDataset(ofdm, channel, snr_cfg)
-            snr_loader = DataLoader(snr_set, batch_size=int(training["batch_size"]), shuffle=False, num_workers=0)
-            for name, (model, mtype) in models.items():
-                if uses_tokens := mtype != "none":
-                    nmse_list = []
-                    model.eval()
+            snr_loader = DataLoader(snr_set, batch_size=int(training["batch_size"]),
+                                    shuffle=False, num_workers=0)
+
+            # Evaluate ALL seeds per model, report mean ± CI
+            for name in models:
+                seed_nmses: list[float] = []
+                for seed_idx in range(num_seeds):
+                    ckpt_path = output_dir / f"{name}_seed{seed_idx}.pt"
+                    if not ckpt_path.exists():
+                        continue
+                    # Re-create model and load checkpoint
+                    m, mtype, _mgroup = models[name]
+                    m.load_state_dict(torch.load(ckpt_path, map_location=device,
+                                                  weights_only=True))
+                    m.to(device)
+                    m.eval()
+                    uses_t = mtype != "none"
+                    nmse_vals = []
                     with torch.no_grad():
                         for batch in snr_loader:
                             batch = move_batch(batch, device)
-                            output, _ = model(batch["tf_input"], batch["path_tokens"], batch["path_valid"])
-                            nmse_list.append(float(nmse_loss(output, batch["target"]).cpu()))
-                    nmse_lin = float(np.mean(nmse_list))
-                    snr_info[name] = {"nmse_linear": nmse_lin, "nmse_db": float(10.0 * np.log10(max(nmse_lin, 1e-12)))}
-                else:
-                    nmse_list = []
-                    model.eval()
-                    with torch.no_grad():
-                        for batch in snr_loader:
-                            batch = move_batch(batch, device)
-                            output = model(batch["tf_input"])
-                            nmse_list.append(float(nmse_loss(output, batch["target"]).cpu()))
-                    nmse_lin = float(np.mean(nmse_list))
-                    snr_info[name] = {"nmse_linear": nmse_lin, "nmse_db": float(10.0 * np.log10(max(nmse_lin, 1e-12)))}
+                            if uses_t:
+                                out, _ = m(batch["tf_input"], batch["path_tokens"],
+                                           batch["path_valid"])
+                            else:
+                                out = m(batch["tf_input"])
+                            nmse_vals.append(float(nmse_loss(out, batch["target"]).cpu()))
+                    seed_nmses.append(float(np.mean(nmse_vals)))
+
+                if seed_nmses:
+                    arr = np.array(seed_nmses)
+                    snr_info[name] = {
+                        "nmse_linear_mean": float(np.mean(arr)),
+                        "nmse_db_mean": float(10.0 * np.log10(max(float(np.mean(arr)), 1e-12))),
+                        "nmse_linear_std": float(np.std(arr, ddof=1)) if len(arr) > 1 else 0.0,
+                        "n_seeds": len(arr),
+                    }
+
             per_snr_results[f"snr_{snr_val:+d}dB"] = snr_info
             # Print summary
-            er_db = snr_info.get("estimated_residual", snr_info.get("physics_residual", {})).get("nmse_db", 0)
+            er = snr_info.get("physics_residual", {})
+            er_db = er.get("nmse_db_mean", 0)
             ddls_db = snr_nl["nmse_estimated_support_ls"]["nmse_db"]
-            print(f"  SNR={snr_val:+d}: ER={er_db:+.2f} dB, DD+LS={ddls_db:+.2f} dB")
+            n_s = er.get("n_seeds", 0)
+            print(f"  SNR={snr_val:+d}: ER={er_db:+.2f} dB (N={n_s}), DD+LS={ddls_db:+.2f} dB")
         all_results["per_snr_evaluation"] = per_snr_results
 
     # --- Gate 1 status matrix ---
@@ -841,7 +884,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     "dependence, but DD+LS baseline is consistently better.",
         },
         "gate_1D1_physical_residual": {
-            "status": "PASS" if per_seed_residual_nmse else "NOT_RUN",
+            "status": "PASS" if "physics_residual" in per_seed_nmse and per_seed_nmse["physics_residual"] else "NOT_RUN",
             "note": "PhysicalResidualEstimator with complex-gain tokens (9-dim), "
                     "explicit H_phys reconstruction, and TF residual gated fusion. "
                     "Target: surpass DD+LS baseline (−8.4 dB).",
@@ -867,21 +910,19 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         hb = all_results.get("hierarchical_bootstrap", {})
         if "tf_only_nmse_linear" in hb:
             tf_hb = hb["tf_only_nmse_linear"]
-            cross_hb = hb["cross_attention_nmse_linear"]
             print(f"\n--- Learned models ({num_seeds} seeds, hierarchical bootstrap) ---")
             print(f"  TF-only NMSE linear:       {tf_hb['mean']:.6f} [{tf_hb['ci_lower']:.6f}, {tf_hb['ci_upper']:.6f}]")
+        if "physics_cross_attention_nmse_linear" in hb:
+            cross_hb = hb["physics_cross_attention_nmse_linear"]
             print(f"  Cross-attention NMSE linear: {cross_hb['mean']:.6f} [{cross_hb['ci_lower']:.6f}, {cross_hb['ci_upper']:.6f}]")
-            if "physical_residual_nmse_linear" in hb:
-                res_hb = hb["physical_residual_nmse_linear"]
-                print(f"  Physical Residual NMSE linear: {res_hb['mean']:.6f} [{res_hb['ci_lower']:.6f}, {res_hb['ci_upper']:.6f}]")
-            if "estimated_residual_nmse_linear" in hb:
-                er_hb = hb["estimated_residual_nmse_linear"]
-                print(f"  Estimated Residual NMSE linear: {er_hb['mean']:.6f} [{er_hb['ci_lower']:.6f}, {er_hb['ci_upper']:.6f}]")
-            if "estimated_residual_vs_ddls_paired_gain_linear" in hb:
-                pg = hb["estimated_residual_vs_ddls_paired_gain_linear"]
-                print(f"  EstRes vs DD+LS paired gain: mean={pg['mean_diff']:.5f} [{pg['ci_lower']:.5f}, {pg['ci_upper']:.5f}]")
-            if "estimated_residual_gate_mean" in hb:
-                print(f"  Estimated Residual gate mean: {hb['estimated_residual_gate_mean']:.4f}")
+        if "physics_residual_nmse_linear" in hb:
+            res_hb = hb["physics_residual_nmse_linear"]
+            print(f"  Physical Residual NMSE linear: {res_hb['mean']:.6f} [{res_hb['ci_lower']:.6f}, {res_hb['ci_upper']:.6f}]")
+        if "physical_residual_vs_ddls_paired_gain_linear" in hb:
+            pg = hb["physical_residual_vs_ddls_paired_gain_linear"]
+            print(f"  PhysRes vs DD+LS paired gain: mean={pg['mean_diff']:.5f} [{pg['ci_lower']:.5f}, {pg['ci_upper']:.5f}]")
+        if "physical_residual_gate_mean" in hb:
+            print(f"  Physical Residual gate mean: {hb['physical_residual_gate_mean']:.4f}")
     print(f"\n--- Gate 1 Status ---")
     for gate, info in all_results["gate_1_status"].items():
         print(f"  {gate}: {info['status']}")
