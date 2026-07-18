@@ -281,3 +281,105 @@ Proper uses of per-path reliability:
 
 Gate 1-F is deprioritized unless Gate 2 proves single-path errors are the
 dominant collapse mode.
+
+---
+
+## 11. Gate 2-A Empirical Results (2026-07-18)
+
+Full sweep: 1024 samples × 46 corruption specs × 2 chains (oracle + estimated).
+Safety baseline: TF-only = −4.62 dB.
+
+### 11.1 Failure Severity Tiers
+
+**☠️ Critical (harm_rate ≥ 90%)**
+
+| Perturbation | Oracle NMSE | Est. NMSE | Harm% | Gate | Note |
+|---|---|---|---|---|---|
+| phase π | **+1.10 dB** | +0.79 dB | 100% | 0.472 | Active destruction |
+| phase π/2 | −0.98 dB | −1.25 dB | 100% | 0.548 | Coherent cancellation |
+| jitter 2.0 joint | −1.20 dB | −1.47 dB | 99.5% | 0.550 | Total location chaos |
+| bias_delay 0.5 | −1.43 dB | −1.59 dB | **100%** | 0.554 | Systematic bias — gate blind |
+| jitter 1.5 joint | −1.27 dB | −1.54 dB | 99.0% | 0.552 | |
+
+**⚠️ Dangerous (harm_rate 30–90%)**
+
+| Perturbation | Oracle NMSE | Harm% |
+|---|---|---|
+| coherent_false 4 | −3.11 dB | 74.0% |
+| mag 2.0 | −4.22 dB | 59.9% |
+| dropout 0.75 | −4.57 dB | 60.6% |
+| jitter 0.5 joint | −2.05 dB | 89.9% |
+
+**✅ Safe (harm_rate < 5%)**
+
+| Perturbation | Oracle NMSE | Harm% | Key Finding |
+|---|---|---|---|
+| **random_false 1/2/4** | **−15.39 dB** | **0.0%** | Model completely immune — null token works |
+| **permute** | **−15.39 dB** | **0.0%** | Permutation invariance confirmed |
+| phase π/8 | −9.94 dB | 0.0% | Small phase errors tolerated |
+| jitter 0.1 joint | −9.00 dB | 3.0% | Small jitter tolerated |
+| mag 0.75–1.25 | −9.3 to −12.7 | 0.0% | Minor gain deviation safe |
+
+### 11.2 Key Findings
+
+**1. Random false paths: completely harmless.** Model uses null token to
+ignore them. Coherent false paths (near strong true paths) are the real
+threat — each added coherent false degrades ~3 dB.
+
+**2. `null_all` fails to reach TF-only — structural defect.**
+
+```
+null_all:  −3.40 dB  (gate = 0.589)
+TF-only:   −4.62 dB  (expected safe fallback)
+Gap:       +1.22 dB  ← GATE 2-A FAIL
+```
+
+Even with all tokens marked invalid, gate stays at 0.59 — nearly 60% of
+the physical reconstruction is still mixed in. The spatial gate reads
+TF features + H_phys + H_TF, not independent token quality signals.
+
+**3. Gate does respond to token quality — but not enough.**
+
+| Condition | Gate mean | NMSE |
+|---|---|---|
+| clean | 0.642 | −15.39 dB |
+| jitter 0.5 | 0.565 | −2.05 dB |
+| phase π | **0.472** | +1.10 dB |
+| null_all | 0.589 | −3.40 dB |
+
+Gate drops from 0.64 to 0.47 under phase reversal, confirming it
+perceives token degradation. But the drop is insufficient — at
+phase π, nearly half the physical branch output is still fused in.
+
+**4. Location jitter: joint > delay ≈ Doppler > bias.**
+
+Joint jitter is consistently worse than single-axis, and systematic
+bias (common offset) is harder for the gate to detect than random
+jitter of equal magnitude — random errors create inconsistency
+between H_phys and H_TF that the gate can exploit.
+
+**5. Oracle vs Estimated chain asymmetry.**
+
+Oracle clean (−15.39 dB) >> Estimated clean (−10.22 dB) — the 5 dB
+gap comes entirely from token quality. Under strong corruption both
+chains converge to the same floor (~−3.4 dB null_all), confirming
+that the model's safety ceiling is architecture-limited, not
+token-quality-limited.
+
+### 11.3 Updated Priority
+
+Based on the null_all result, the priority ordering is revised:
+
+```
+1. Gate 2-C: Structural safety fusion (fix null_all → TF-only gap)
+   └── Quality-conditioned gate with explicit token reliability inputs
+2. Self-verifying tokens (check residual, PSLR, LOO → per-path quality)
+3. Corruption-aware training (with phase/coherent/jitter augmentation)
+4. Boundary/Stress K=6/8
+5. Unknown-K
+```
+
+The null_all exposure is the single most actionable finding: the
+current gate is a spatial mixer, not a reliability gate. Fixing this
+requires architectural change — the gate must receive explicit token
+quality evidence, not just TF features and reconstructions.
