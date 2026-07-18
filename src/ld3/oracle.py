@@ -566,7 +566,7 @@ def _synthesize_from_params(
 
 
 # ---------------------------------------------------------------------------
-# Token perturbation (Gate 2)
+# Token perturbation / corruption (Gate 2)
 # ---------------------------------------------------------------------------
 
 
@@ -581,66 +581,216 @@ def perturb_tokens(
     max_delay_bins: float = 12.0,
     max_abs_doppler_bins: float = 3.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Inject controlled prior errors for Gate 2 experiments.
+    """Legacy wrapper — delegates to corrupt_tokens for backward compat."""
+    return corrupt_tokens(
+        tokens, valid, rng,
+        delay_jitter_std=delay_std,
+        doppler_jitter_std=doppler_std,
+        random_false_paths=false_paths,
+        drop_probability=miss_probability,
+        max_delay_bins=max_delay_bins,
+        max_abs_doppler_bins=max_abs_doppler_bins,
+    )
 
-    Processing order:
-      1. Perturb active paths' delay/Doppler with Gaussian noise → clip to
-         physical range.
-      2. Update sigma fields and confidence.
-      3. Mark missed paths (valid=False).
-      4. Inject false paths into free slots.  The number actually injected
-         is min(false_paths, available_free_slots).  If fewer slots are
-         available than requested, a RuntimeWarning is issued.
+
+def corrupt_tokens(
+    tokens: np.ndarray,         # [L, 9] float32
+    valid: np.ndarray,          # [L] bool
+    rng: np.random.Generator,
+    *,
+    # --- Location perturbation ---
+    delay_jitter_std: float = 0.0,
+    doppler_jitter_std: float = 0.0,
+    common_bias_delay: float = 0.0,
+    common_bias_doppler: float = 0.0,
+    # --- Token dropout ---
+    drop_probability: float = 0.0,
+    # --- False paths ---
+    random_false_paths: int = 0,
+    coherent_false_paths: int = 0,
+    # For coherent false: true path positions (needed to place false near strong)
+    true_delays: np.ndarray | None = None,
+    true_dopplers: np.ndarray | None = None,
+    # --- Gain perturbation ---
+    gain_magnitude_factor: float | str = 1.0,
+    gain_phase_rad: float = 0.0,
+    # --- Permutation ---
+    permute_paths: bool = False,
+    # --- Null all tokens ---
+    null_all: bool = False,
+    # --- Grid bounds ---
+    max_delay_bins: float = 12.0,
+    max_abs_doppler_bins: float = 3.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inject controlled token errors for Gate 2 failure-boundary audit.
+
+    Processing order (each step sees the output of the previous):
+      1. Location jitter (independent + common bias)
+      2. Gain magnitude error
+      3. Gain phase error
+      4. Token dropout (valid → False)
+      5. Inject false paths (random + coherent) into free slots
+      6. Path permutation
+      7. Null-all override
+
+    Returns (corrupted_tokens, corrupted_valid).  The input arrays are NOT
+    modified in-place.
+
+    Token layout (9-dim, v2):
+      0: delay_bin      1: doppler_bin     2: normalised power
+      3: confidence     4: sigma_delay     5: sigma_doppler
+      6: relevance      7: Re(α)           8: Im(α)
     """
-
     out = tokens.copy()
     out_valid = valid.copy()
     max_paths = out.shape[0]
-    n_active_orig = int(np.sum(out_valid))
+    active = np.flatnonzero(out_valid).copy()
 
-    # ---- step 1: perturb active paths ----
-    active = np.flatnonzero(out_valid)
-    if active.size:
-        out[active, 0] += rng.normal(0.0, delay_std, size=active.size)
-        out[active, 1] += rng.normal(0.0, doppler_std, size=active.size)
+    # ---- null-all shortcut ----
+    if null_all:
+        out_valid[:] = False
+        return out, out_valid
+
+    # ===================================================================
+    # 1. Location perturbation
+    # ===================================================================
+    if active.size and (delay_jitter_std > 0 or doppler_jitter_std > 0
+                        or common_bias_delay != 0 or common_bias_doppler != 0):
+        # Independent jitter
+        if delay_jitter_std > 0:
+            out[active, 0] += rng.normal(0.0, delay_jitter_std, size=active.size)
+        if doppler_jitter_std > 0:
+            out[active, 1] += rng.normal(0.0, doppler_jitter_std, size=active.size)
+
+        # Common bias
+        out[active, 0] += common_bias_delay
+        out[active, 1] += common_bias_doppler
 
         # Clip to physical range
         out[active, 0] = np.clip(out[active, 0], 0.0, max_delay_bins)
         out[active, 1] = np.clip(
-            out[active, 1], -max_abs_doppler_bins, max_abs_doppler_bins
+            out[active, 1], -max_abs_doppler_bins, max_abs_doppler_bins,
         )
 
-        # ---- step 2: update sigma + confidence ----
-        out[active, 4] = delay_std
-        out[active, 5] = doppler_std
-        confidence = math.exp(-0.5 * (delay_std**2 + doppler_std**2))
-        out[active, 3] = confidence
+        # Update sigma fields + confidence based on total jitter
+        total_std = math.sqrt(delay_jitter_std**2 + doppler_jitter_std**2
+                              + common_bias_delay**2 + common_bias_doppler**2)
+        out[active, 4] = np.clip(total_std, 0.0, 2.0)
+        out[active, 5] = np.clip(total_std, 0.0, 2.0)
+        confidence_decay = float(math.exp(-0.5 * total_std))
+        out[active, 3] = np.clip(out[active, 3] * confidence_decay, 0.05, 1.0)
 
-        # ---- step 3: mark missed paths ----
-        missed = rng.random(active.size) < miss_probability
-        out_valid[active[missed]] = False
+    # ===================================================================
+    # 2. Gain magnitude error
+    # ===================================================================
+    if active.size and gain_magnitude_factor != 1.0:
+        if isinstance(gain_magnitude_factor, str):
+            # "uniform_0.5_2.0" → sample per-path from uniform range
+            lo, hi = 0.5, 2.0
+            factors = rng.uniform(lo, hi, size=active.size)
+        else:
+            factors = np.full(active.size, float(gain_magnitude_factor))
+        out[active, 7] *= factors  # Re(α)
+        out[active, 8] *= factors  # Im(α)
+        # Update power field
+        old_power = out[active, 2].copy()
+        new_power = old_power * (factors ** 2)
+        # Keep normalised power of ACTIVE tokens consistent; caller doesn't
+        # rely on absolute normalisation but it's cleaner.
+        out[active, 2] = new_power
 
-    # ---- step 4: inject false paths into free slots ----
-    # Free slots = originally invalid + newly missed
-    free = np.flatnonzero(~out_valid)
-    n_free = len(free)
-    n_inject = min(false_paths, n_free)
-    if n_inject < false_paths:
-        warnings.warn(
-            f"perturb_tokens: only {n_inject}/{false_paths} false paths injected "
-            f"({n_free} free slots with {n_active_orig} active, "
-            f"{max_paths} max).  Consider increasing max_paths.",
-            RuntimeWarning,
-        )
+    # ===================================================================
+    # 3. Gain phase error
+    # ===================================================================
+    if active.size and gain_phase_rad != 0.0:
+        if isinstance(gain_phase_rad, str):
+            # "uniform_pi8_pi" → random phase ∈ [π/8, π]
+            lo, hi = math.pi / 8, math.pi
+            phases = rng.uniform(lo, hi, size=active.size)
+        else:
+            phases = np.full(active.size, float(gain_phase_rad))
+        cos_p = np.cos(phases)
+        sin_p = np.sin(phases)
+        re = out[active, 7].copy()
+        im = out[active, 8].copy()
+        out[active, 7] = re * cos_p - im * sin_p
+        out[active, 8] = re * sin_p + im * cos_p
 
-    for idx in free[:n_inject]:
-        out[idx, 0] = rng.uniform(0.0, max_delay_bins)
-        out[idx, 1] = rng.uniform(-max_abs_doppler_bins, max_abs_doppler_bins)
-        out[idx, 2] = rng.uniform(0.01, 0.1)
-        out[idx, 3] = rng.uniform(0.05, 0.4)
-        out[idx, 4] = 1.0
-        out[idx, 5] = 1.0
-        out[idx, 6] = rng.uniform(0.0, 0.3)
-        out_valid[idx] = True
+    # ===================================================================
+    # 4. Token dropout
+    # ===================================================================
+    if active.size and drop_probability > 0:
+        drop_mask = rng.random(active.size) < drop_probability
+        out_valid[active[drop_mask]] = False
+        active = np.flatnonzero(out_valid)  # refresh
+
+    # ===================================================================
+    # 5. Inject false paths into free slots
+    # ===================================================================
+    total_false = random_false_paths + coherent_false_paths
+    if total_false > 0:
+        free = np.flatnonzero(~out_valid)
+        n_free = len(free)
+        n_inject = min(total_false, n_free)
+        if n_inject < total_false:
+            warnings.warn(
+                f"corrupt_tokens: only {n_inject}/{total_false} false paths "
+                f"injected ({n_free} free slots, {max_paths} max).",
+                RuntimeWarning,
+            )
+
+        # Split free slots: first coherent, then random
+        n_coherent_inject = min(coherent_false_paths, n_inject)
+        n_random_inject = n_inject - n_coherent_inject
+
+        # --- Coherent false paths ---
+        if n_coherent_inject > 0 and true_delays is not None and true_dopplers is not None \
+                and len(true_delays) > 0 and len(true_dopplers) > 0:
+            # Pick the strongest true path as anchor
+            strongest_idx = 0  # paths are sorted by power
+            anchor_tau = float(true_delays[strongest_idx])
+            anchor_nu = float(true_dopplers[strongest_idx])
+            for idx in free[:n_coherent_inject]:
+                # Small offset from the strongest true path
+                out[idx, 0] = anchor_tau + rng.uniform(-0.5, 0.5)
+                out[idx, 1] = anchor_nu + rng.uniform(-0.5, 0.5)
+                out[idx, 0] = np.clip(out[idx, 0], 0.0, max_delay_bins)
+                out[idx, 1] = np.clip(out[idx, 1], -max_abs_doppler_bins, max_abs_doppler_bins)
+                # Plausible gain: 20-60% of the anchor gain
+                scale = rng.uniform(0.2, 0.6)
+                if true_delays is not None and len(true_delays) > strongest_idx:
+                    # Use the anchor gain magnitude
+                    out[idx, 7] = scale  # placeholder; real gain unknown
+                    out[idx, 8] = 0.0
+                out[idx, 2] = rng.uniform(0.05, 0.3)
+                out[idx, 3] = rng.uniform(0.2, 0.5)  # medium confidence
+                out[idx, 4] = 0.5
+                out[idx, 5] = 0.5
+                out[idx, 6] = rng.uniform(0.0, 0.5)
+                out_valid[idx] = True
+
+        # --- Random false paths ---
+        if n_random_inject > 0:
+            free_remaining = free[n_coherent_inject:n_inject]
+            for idx in free_remaining:
+                out[idx, 0] = rng.uniform(0.0, max_delay_bins)
+                out[idx, 1] = rng.uniform(-max_abs_doppler_bins, max_abs_doppler_bins)
+                out[idx, 2] = rng.uniform(0.01, 0.1)
+                out[idx, 3] = rng.uniform(0.05, 0.4)
+                out[idx, 4] = 1.0
+                out[idx, 5] = 1.0
+                out[idx, 6] = rng.uniform(0.0, 0.3)
+                out[idx, 7] = 0.0
+                out[idx, 8] = 0.0
+                out_valid[idx] = True
+
+    # ===================================================================
+    # 6. Path permutation (shuffle order of valid tokens)
+    # ===================================================================
+    if permute_paths and active.size > 1:
+        active = np.flatnonzero(out_valid)
+        perm = rng.permutation(len(active))
+        out[active] = out[active[perm]]
+        # valid mask stays the same — only the ORDER of active slots changes
 
     return out, out_valid

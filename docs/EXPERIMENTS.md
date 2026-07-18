@@ -11,6 +11,8 @@ Date: 2026-07-18
 | `gate1_boundary_estimated.yaml` | Estimated | 0 dB | |
 | `gate1_stress_estimated.yaml` | Estimated | 5 dB, ρ=0.0625 | |
 | `gate1_multisnr.yaml` | Estimated | −5~+20 dB | |
+| `gate1_K6_estimated.yaml` | Estimated, K=6 | 10 dB | K-sweep |
+| `gate1_K8_estimated.yaml` | Estimated, K=8 | 10 dB | K-sweep |
 
 ---
 
@@ -142,6 +144,46 @@ for K,path in [(4,'results/gate0'), (6,'results/gate0_K6'), (8,'results/gate0_K8
 
 ---
 
+## P4: Gate 1 K-Sweep (2 GPU runs)
+
+### Run
+
+```powershell
+# K=6 with estimated tokens
+python experiments/gate1_oracle.py --config configs/gate1_K6_estimated.yaml --output-dir results/gate1_K6 --device cuda
+
+# K=8 with estimated tokens
+python experiments/gate1_oracle.py --config configs/gate1_K8_estimated.yaml --output-dir results/gate1_K8 --device cuda
+```
+
+⏱ ~3h each GPU. Can parallel run on 2 GPUs.
+
+### View
+
+```powershell
+python -c "
+import json, math
+for K,path in [(4,'results/gate1_estimated'), (6,'results/gate1_K6'), (8,'results/gate1_K8')]:
+    d = json.load(open(f'{path}/gate1_results.json'))
+    hb = d['hierarchical_bootstrap']
+    ddls = d['non_learned_baselines']['test']['nmse_estimated_support_ls']['nmse_db']
+    er = hb['estimated_residual_nmse_linear']
+    er_db = 10*math.log10(er['mean'])
+    gain = hb['estimated_residual_vs_ddls_paired_gain_linear']
+    print(f'K={K}: DD+LS={ddls:+.1f}, EstRes={er_db:+.1f} [{er[\"ci_lower\"]:.4f}, {er[\"ci_upper\"]:.4f}], gain={gain[\"mean_diff\"]:.4f} [{gain[\"ci_lower\"]:.4f}, {gain[\"ci_upper\"]:.4f}], gate={hb[\"estimated_residual_gate_mean\"]:.3f}')
+"
+```
+
+Expected output:
+
+| K | DD+LS | Est. Residual | Gain vs DD+LS | Gate Mean |
+|---|-------|---------------|----------------|-----------|
+| 4 | −8.36 | −9.76 | +0.040 [0.038, 0.043] | 0.618 |
+| 6 | −7.59 | −9.45 | +0.061 [0.059, 0.063] | 0.718 |
+| 8 | −7.01 | −8.87 | +0.069 [0.067, 0.072] | 0.701 |
+
+---
+
 ## Checklist
 
 ```
@@ -150,6 +192,8 @@ for K,path in [(4,'results/gate0'), (6,'results/gate0_K6'), (8,'results/gate0_K8
 ☐ P2: Density scan      (~15min CPU)
 ☐ P3: K=6 scan          (~20min CPU)
 ☐ P3: K=8 scan          (~20min CPU, parallel)
+☐ P4: Gate 1 K=6        (~3h GPU)
+☐ P4: Gate 1 K=8        (~3h GPU, parallel)
 
 Then:
 ☐ git add results/ && git commit -m "Final experiments" && git push

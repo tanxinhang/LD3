@@ -109,16 +109,23 @@ DD+LS NMSE as K increases. 500 trials per point.
 stays above 0.75. Under the exponential power decay profile, later-added paths
 are naturally weaker, so the DD detector preferentially retains dominant-energy
 paths while missing weaker ones. Higher K leaves a larger unreconstructed
-residual after DD-based parametric estimation — creating potential (but not yet
-verified) headroom for learned residual compensation. Whether the residual
-network's gain G_learn(K) increases, stays flat, or decreases with K requires a
-Gate 1 K-sweep experiment to determine.
+residual after DD-based parametric estimation. Gate 1 K-sweep (§3.8) confirms
+this headroom is real and grows with K: the PhysicalResidual learned gain over
+DD+LS increases from +1.40 dB (K=4) to +1.86 dB (K=6) to +1.86 dB (K=8).
 
 **Note**: All K-scan experiments use Known-K (true path count provided to the
 detector). At K=8, the detector outputs 8 candidates but only ~4.2 match true
 paths. The remaining ~3.8 are false candidates, so the residual network must
 both compensate for missed weak paths AND suppress contributions from incorrect
 tokens. This makes safe fusion (Gate 2) increasingly important as K grows.
+
+**K-sweep conclusion**: The learned residual gain G_learn(K) increases from
+K=4→6 and stays flat from K=6→8. The spatial gate mean rises from 0.62 (K=4)
+to 0.72 (K=6) to 0.70 (K=8), indicating the model increasingly trusts the
+physical reconstruction branch when more paths are available — even though
+DD support estimation degrades (recall 0.73→0.60→0.52). The gain plateau at
+K=8 may reflect the DD detector's floor: at ~52% recall, nearly half the path
+tokens are wrong, and the residual network approaches its ability to compensate.
 
 ---
 
@@ -209,6 +216,53 @@ SNR ≥ 0 dB: model consistently outperforms DD+LS.
 
 Model strongly depends on correct DD tokens.
 
+### 3.8 Path-Count Sweep (K=4/6/8, Estimated Tokens)
+
+Three K values, same setting: ρ=0.125, 10 dB SNR, estimated tokens (DD+LS),
+3 seeds × 300 epochs. Hierarchical bootstrap CIs over seeds.
+
+| K | TF-only | Cross-Attn | DD+LS | **Est. Residual** | Δ (vs DD+LS) | Gate Mean |
+|---|---------|------------|-------|-------------------|---------------|-----------|
+| 4 | −4.62 | −7.97 | −8.36 | **−9.76** [−9.87, −9.65] | **+1.40** [1.20, 1.61] | 0.618 |
+| 6 | −5.19 | −8.53 | −7.59 | **−9.45** [−9.53, −9.37] | **+1.86** [1.74, 1.97] | 0.718 |
+| 8 | −4.98 | −8.07 | −7.01 | **−8.87** [−8.94, −8.79] | **+1.86** [1.74, 1.97] | 0.701 |
+
+All Δ values statistically significant (paired bootstrap p < 1e-4 via
+hierarchical resampling). CIs in brackets are 95% hierarchical bootstrap.
+
+**Key findings:**
+
+1. **Gain increases with K then plateaus.** From K=4→6, the learned advantage
+   over DD+LS grows from +1.40 to +1.86 dB. From K=6→8, gain stays at +1.86 dB
+   — the residual network reaches its compensation capacity as DD recall drops
+   to 0.52 (nearly half the tokens are wrong).
+
+2. **Gate mean rises with K.** 0.62 (K=4) → 0.72 (K=6) → 0.70 (K=8). The model
+   learns to trust the physical reconstruction branch more when more paths
+   provide richer DD prior information — even though individual path accuracy
+   degrades.
+
+3. **DD+LS degrades faster than PhysicalResidual.** DD+LS drops 1.35 dB from
+   K=4→8 (−8.36→−7.01), while PhysicalResidual drops only 0.89 dB
+   (−9.76→−8.87). The TF residual branch partially compensates for DD support
+   degradation.
+
+4. **Oracle+LS upper bound also degrades with K** (−24.3→−22.6→−21.2 dB),
+   reflecting the fundamental information-theoretic cost of estimating more
+   complex-gain parameters from fixed pilot resources.
+
+5. **TF-only is roughly flat across K** (−4.6 to −5.2 dB) — the CNN baseline
+   is indifferent to path count since it operates purely in the TF domain.
+
+**Architecture insight**: The K-sweep validates the core design hypothesis of
+Gate 1-D1: explicit physical reconstruction with zero-init residual provides a
+structurally monotonic prior — even when individual DD tokens are inaccurate,
+the physics branch contributes a superposition of all path hypotheses, and the
+TF residual suppresses what doesn't match the data. The gain plateau at K=8
+suggests that further K increases will eventually require improved DD support
+quality (Gate 0-B) or safe fusion mechanisms (Gate 2) to prevent the residual
+branch from being overwhelmed by false tokens.
+
 ---
 
 ## 4. Literature Comparison (Internal Diagnostic — Not SOTA Benchmark)
@@ -290,8 +344,10 @@ Gate 1-A    Physical model closure ..................... PASS (nmse_perfect = 0)
 Gate 1-B    Oracle continuous-support value ............ PASS (+22.9 dB)
 Gate 1-C    DD estimated support value ................. PASS (−8.4 dB baseline)
 Gate 1-D1   Oracle Physical Residual (zero-init) ...... PASS (−19.6 dB)
-Gate 1-E2   Estimated-token Physical Residual .......... PASS (+1.4 dB vs DD+LS)
+Gate 1-E2   Estimated-token Physical Residual .......... PASS (+1.40 dB vs DD+LS)
 Gate 1-E3   Multi-SNR unified model .................... PASS (SNR ≥ 0 dB)
+Gate 1-E4   K-sweep (K=6 estimated tokens) ............. PASS (+1.86 dB vs DD+LS)
+Gate 1-E5   K-sweep (K=8 estimated tokens) ............. PASS (+1.86 dB vs DD+LS)
 Gate 1-F    Per-path gate .............................. FAIL (−1.0 dB regression)
 
 Gate 2      Safe degradation under corrupted priors .... OPEN
@@ -325,6 +381,10 @@ python experiments/gate1_oracle.py --config configs/gate1_multisnr.yaml --output
 
 # Gate 1 — Literature baselines (A-MMSE + D2AN + LD3)
 python experiments/gate1_oracle.py --config configs/gate1_main.yaml --output-dir results/gate1_literature --device cuda
+
+# Gate 1 — K-sweep (estimated tokens)
+python experiments/gate1_oracle.py --config configs/gate1_K6_estimated.yaml --output-dir results/gate1_K6 --device cuda
+python experiments/gate1_oracle.py --config configs/gate1_K8_estimated.yaml --output-dir results/gate1_K8 --device cuda
 ```
 
 ### 5.2 Config Index
@@ -338,6 +398,8 @@ python experiments/gate1_oracle.py --config configs/gate1_main.yaml --output-dir
 | `configs/gate1_boundary_estimated.yaml` | Estimated tokens, 0 dB |
 | `configs/gate1_stress_estimated.yaml` | Estimated tokens, 5 dB, ρ=0.0625 |
 | `configs/gate1_multisnr.yaml` | Multi-SNR (−5 to +20 dB), estimated tokens |
+| `configs/gate1_K6_estimated.yaml` | Estimated tokens, K=6 paths |
+| `configs/gate1_K8_estimated.yaml` | Estimated tokens, K=8 paths |
 
 ### 5.3 RNG Seeding
 

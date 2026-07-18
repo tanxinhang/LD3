@@ -1,0 +1,28 @@
+# Gate 2-A corruption audit — smoke test configuration
+#
+# This is a run RECIPE, not a config that the script reads directly.
+# The experiment script reads config from the pre-trained model's gate1_results.json.
+#
+# Usage:
+#   python experiments/gate2_corruption.py \
+#     --model-dir results/gate1_estimated \
+#     --output-dir results/gate2_corruption \
+#     --samples 200 --device cpu --smoke-only
+#
+# For the full sweep (all perturbation types), omit --smoke-only.
+
+smoke_test:
+  samples: 200
+  perturbation_types: [dropout, coherent_false, phase_error, joint_jitter]
+  chains: [oracle, estimated]
+
+# Smoke perturbation matrix:
+#
+#   dropout:        0.25, 0.50, 0.75, 1.00
+#   coherent_false: 1, 2, 4
+#   phase_error:    π/8, π/4, π/2, π
+#   joint_jitter:   0.1, 0.5, 1.0, 2.0 bins
+#
+# Plus: clean baseline + null_all terminal.
+#
+# Total: (1+4+3+4+4+1) × 2 chains = 34 evaluations
