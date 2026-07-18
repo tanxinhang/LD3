@@ -306,8 +306,11 @@ def train_model(
                         pt = pt[perm]
                         pv = pv[perm]
 
-                output, diagnostics = model(batch["tf_input"], pt, pv,
-                                            return_components=(aux_tf_weight > 0 or aux_phys_weight > 0))
+                want_experts = (aux_tf_weight > 0 or aux_phys_weight > 0)
+                if model_type == "physical_residual" and want_experts:
+                    output, diagnostics = model(batch["tf_input"], pt, pv, return_components=True)
+                else:
+                    output, diagnostics = model(batch["tf_input"], pt, pv)
             else:
                 output = model(batch["tf_input"])
                 diagnostics = {}
