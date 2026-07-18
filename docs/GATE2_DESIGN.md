@@ -476,3 +476,56 @@ P3: Quality map v2 — add valid_ratio, all-null flag, check residual
 P4: Corruption-aware training — phase/coherent/bias augmentation
 P5: Boundary/Stress K=6/8 — validate robustness under difficulty
 ```
+
+### 11.6 Mechanism-Gradient Baselines (2026-07-18)
+
+Four baselines from simple to complex, all using the SAME frozen H_phys and
+H_Tf from the Gate 2-C model.  717 test samples, hyperparameters optimised on
+307 validation samples.
+
+| Method | NMSE (dB) | Params | Trained | Key insight |
+|---|---|---|---|---|
+| H_phys-only | −8.50 | 0 | No | Upper bound of pure physics |
+| TF-only (standalone) | −5.06 | CNN | Yes | Lower bound (no DD prior) |
+| Fixed blend (λ=0.80) | **−9.15** | 1 | No | 80% physics + 20% TF |
+| Hard switch | −5.52 | 1 | No | Threshold on |H_phys−H_TF|² |
+| Logistic quality gate | −9.04 | 3 | Light | Same features as Gate 2-C, scalar gate |
+| Hold-out pilot select | −8.27 | 0 | No | Split pilots, pick min check residual |
+| **Spatial quality gate** | **−10.45** | CNN | Yes | Gate 2-C final architecture |
+
+**Key findings:**
+
+1. **The bulk of fusion gain comes from simple scalar blending.**
+   Fixed blend (λ=0.80, 1 parameter, no training) achieves −9.15 dB —
+   within 1.30 dB of the full spatial quality gate (−10.45 dB) and
+   +4.09 dB over TF-only. The physics branch dominates (80% weight).
+
+2. **Quality features have near-zero scalar value.** Logistic quality gate
+   (3 params) vs Fixed blend (1 param): −9.04 vs −9.15 — a mere 0.11 dB
+   difference. At the scalar level, the three quality features
+   (discrepancy, confidence, uncertainty) add negligible discriminative
+   power. q_mean ≈ 0.80 confirms the model is essentially learning λ=0.80
+   in a more complex way.
+
+3. **Spatial gating contributes a genuine +1.30 dB.** The gap from Fixed
+   blend (−9.15) to Spatial quality gate (−10.45) isolates the value of
+   per-pixel spatial gating: the gate learns WHERE to trust physics, not
+   just HOW MUCH. This +1.30 dB is the architecture's core contribution.
+
+4. **"Clever" non-learned baselines underperform simple blending.** Hard
+   switch (−5.52 dB, barely above TF-only) and hold-out pilot selector
+   (−8.27 dB, below H_phys-only) both fail because their binary selection
+   loses information — the optimal answer is almost always a soft blend,
+   not a hard choice.
+
+**Implications for the paper narrative:**
+
+The mechanism gradient answers the reviewer question "is the complex
+spatial gate justified?" with a layered yes:
+- Most gain: fusion itself (Fixed blend, −9.15)
+- Small gain: quality features in isolation (Logistic, −9.04)
+- Genuine gain: spatial gating (Spatial, −10.45, +1.30 dB)
+- No gain: hard selection rules lose information
+
+This is a stronger argument than "our CNN beats their CNN" — it shows
+exactly which complexity increment pays for itself.

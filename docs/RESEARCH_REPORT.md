@@ -459,6 +459,45 @@ gate1_estimated (K=4, 10 dB, ρ=0.125, 3 seeds × 300 epochs).
 See `docs/GATE2_DESIGN.md` §11.4–11.5 for complete audit results and
 revised priority ordering.
 
+### 5.5 Mechanism-Gradient Safety Baselines
+
+Four baselines using the SAME frozen H_phys and H_Tf from the Gate 2-C model.
+717 test samples, hyperparameters optimised on 307 validation samples.
+
+| Method | NMSE (dB) | Params | Trained |
+|---|---|---|---|
+| H_phys-only | −8.50 | 0 | No |
+| TF-only (standalone) | −5.06 | CNN | Yes |
+| Fixed blend (λ=0.80) | **−9.15** | 1 | No |
+| Hard switch | −5.52 | 1 | No |
+| Logistic quality gate | −9.04 | 3 | Light |
+| Hold-out pilot select | −8.27 | 0 | No |
+| **Spatial quality gate (Gate 2-C)** | **−10.45** | CNN | Yes |
+
+**Key findings:**
+
+1. **Fusion gain = mostly scalar blending.** Fixed blend (λ=0.80, 1 parameter,
+   no training) achieves −9.15 dB — within 1.30 dB of the spatial quality
+   gate. The physics branch dominates at 80% weight.
+
+2. **Quality features have near-zero marginal value at scalar level.**
+   Logistic quality gate (−9.04 dB) vs Fixed blend (−9.15 dB) = 0.11 dB
+   difference. The three quality features add negligible discriminative
+   power beyond a single blend ratio.
+
+3. **Spatial gating contributes a genuine +1.30 dB.** Isolates the value of
+   per-pixel gating: the gate learns WHERE to trust physics, not just HOW
+   MUCH. This is the architecture's core contribution, confirmed against
+   the simplest possible counterfactual.
+
+4. **"Smart" hard selection rules lose information.** Hard switch (−5.52 dB)
+   and hold-out pilot selector (−8.27 dB) both underperform simple blending.
+   Binary selection discards the soft-blend information that both branches
+   contain.
+
+See `docs/GATE2_DESIGN.md` §11.6 for complete analysis and paper narrative
+implications.
+
 ---
 
 ## 6. Gate Status
@@ -496,6 +535,12 @@ Gate 2-C4   null_all → TF-only gap ...................... DATA INCONSISTENT (+
 Gate 2-C5   Hard null-fallback (v = I[valid]) ........... OPEN
 Gate 2-C6   Null error decomposition .................... OPEN
 Gate 2-C7   Quality map v2 (check residual, all-null) ... OPEN
+
+Gate 2-D1   Fixed blend baseline ........................ PASS (−9.15 dB, 1 param)
+Gate 2-D2   Hard discrepancy switch ..................... PASS (−5.52 dB, below TF-only)
+Gate 2-D3   Logistic quality gate ....................... PASS (−9.04 dB, 3 params)
+Gate 2-D4   Hold-out pilot selector ..................... PASS (−8.27 dB, no training)
+Gate 2-D5   Spatial gate vs fixed blend ................. +1.30 dB (genuine spatial gain)
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```
