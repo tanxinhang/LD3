@@ -316,16 +316,18 @@ def main() -> None:
     print(f"   best T={best_T:.4f}  test NMSE={sho_test['nmse_db']:+.2f} dB  "
           f"q_mean={sho_test['q_mean']:.3f}")
 
-    # --- 6. Gate × Residual 2×2 ablation ---
-    print("\n6. Gate × Residual 2×2 ablation (frozen model, forward-only)...")
-    ablation_modes = {
-        "fixed_blend_nores": ("Fixed λ, no ΔH", "fixed_blend_nores"),
-        "spatial_nores":     ("Spatial gate, no ΔH", "spatial_nores"),
-        "fixed_blend_res":   ("Fixed λ + ΔH", "fixed_blend_res"),
-        "spatial_res":       ("Spatial gate + ΔH", "full"),
+    # --- 6. Gate × Residual factorial ablation (decoupled switches) ---
+    print("\n6. Gate x Residual factorial ablation (frozen model, forward-only)...")
+    ablation_specs = {
+        "fixed_nores":      ("Fixed lam, no DeltaH",      "fixed", False, "none"),
+        "spatial_nores":    ("Spatial gate, no DeltaH",   "spatial", False, "none"),
+        "fixed_res":        ("Fixed lam + DeltaH",        "fixed", True, "none"),
+        "spatial_res":      ("Spatial gate + DeltaH",     "spatial", True, "none"),
+        "fixed_res_gate":   ("Fixed lam + gate*DeltaH",   "fixed", True, "gate"),
+        "spatial_res_gate": ("Spatial gate + gate*DeltaH","spatial", True, "gate"),
     }
     ablation_results = {}
-    for key, (label, mode) in ablation_modes.items():
+    for key, (label, fm, res, coup) in ablation_specs.items():
         nmses = []
         with torch.no_grad():
             for idx in range(test_sl.start, test_sl.stop):
@@ -334,12 +336,13 @@ def main() -> None:
                 target = sample["target"].unsqueeze(0).to(device)
                 pt = sample["path_tokens"].unsqueeze(0).to(device)
                 pv = sample["path_valid"].unsqueeze(0).to(device)
-                out, _ = model(tf_in, pt, pv, ablation_mode=mode, fixed_lam=best_lam)
+                out, _ = model(tf_in, pt, pv, fusion_mode=fm, use_residual=res,
+                               residual_coupling=coup, fixed_lam=best_lam)
                 nmses.append(float(nmse_torch(out, target).cpu()))
         nmse_lin = float(np.mean(nmses))
         nmse_db = _nmse_db(nmse_lin)
         ablation_results[key] = {"label": label, "nmse_linear": nmse_lin, "nmse_db": nmse_db}
-        print(f"   {label:<25s} NMSE={nmse_db:+.2f} dB")
+        print(f"   {label:<30s} NMSE={nmse_db:+.2f} dB")
     results["gate_residual_ablation"] = ablation_results
 
     # ===================================================================
@@ -357,14 +360,18 @@ def main() -> None:
         ("Logistic quality gate", lqg_test["nmse_db"], "3 params", "Light"),
         ("Hold-out pilot select", ho_test["nmse_db"], "Pilot split", "No"),
         ("Soft hold-out blend", sho_test["nmse_db"], f"T={best_T:.4f}", "No"),
-        ("--- 2x2 ablation ---", None, "", ""),
-        ("Fixed lam, no ΔH", ablation_results["fixed_blend_nores"]["nmse_db"],
+        ("--- Factorial ablation ---", None, "", ""),
+        ("Fixed lam, no DeltaH", ablation_results["fixed_nores"]["nmse_db"],
          f"lam={best_lam:.2f}", "No"),
-        ("Spatial gate, no ΔH", ablation_results["spatial_nores"]["nmse_db"],
+        ("Spatial gate, no DeltaH", ablation_results["spatial_nores"]["nmse_db"],
          "CNN gate", "Yes"),
-        ("Fixed lam + ΔH", ablation_results["fixed_blend_res"]["nmse_db"],
+        ("Fixed lam + DeltaH", ablation_results["fixed_res"]["nmse_db"],
          f"lam={best_lam:.2f}", "No"),
-        ("Spatial gate + ΔH", ablation_results["spatial_res"]["nmse_db"],
+        ("Spatial gate + DeltaH", ablation_results["spatial_res"]["nmse_db"],
+         "CNN gate", "Yes"),
+        ("Fixed lam + gate*DeltaH", ablation_results["fixed_res_gate"]["nmse_db"],
+         f"lam={best_lam:.2f}", "No"),
+        ("Spatial gate + gate*DeltaH", ablation_results["spatial_res_gate"]["nmse_db"],
          "CNN gate", "Yes"),
         ("--- Full model ---", None, "", ""),
         ("**Spatial quality gate**", results["spatial_quality_gate_nmse_db"], "CNN gate", "Yes"),

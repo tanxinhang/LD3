@@ -259,6 +259,8 @@ def train_model(
     aug_batch_dropout_prob: float = 0.0,
     aug_dropped_token_fraction: float = 0.3,
     aug_batch_shuffle_prob: float = 0.0,
+    aux_tf_weight: float = 0.0,
+    aux_phys_weight: float = 0.0,
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
@@ -304,11 +306,19 @@ def train_model(
                         pt = pt[perm]
                         pv = pv[perm]
 
-                output, diagnostics = model(batch["tf_input"], pt, pv)
+                output, diagnostics = model(batch["tf_input"], pt, pv,
+                                            return_components=(aux_tf_weight > 0 or aux_phys_weight > 0))
             else:
                 output = model(batch["tf_input"])
                 diagnostics = {}
             loss = nmse_loss(output, batch["target"])
+
+            # Auxiliary expert losses (MoE: ensure each expert works independently)
+            if aux_tf_weight > 0 and "E_tf" in diagnostics:
+                loss = loss + aux_tf_weight * nmse_loss(diagnostics["E_tf"], batch["target"])
+            if aux_phys_weight > 0 and "E_phys" in diagnostics:
+                loss = loss + aux_phys_weight * nmse_loss(diagnostics["E_phys"], batch["target"])
+
             if not torch.isfinite(loss):
                 raise RuntimeError(f"non-finite loss at epoch {epoch}")
             loss.backward()
@@ -499,6 +509,9 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
     aug_dropped_token_fraction = float(aug_cfg.get("dropped_token_fraction", 0.3))
     aug_batch_shuffle_prob = float(aug_cfg.get("batch_shuffle_prob", 0.0))
+    loss_cfg = training.get("loss_weights", {})
+    aux_tf_weight = float(loss_cfg.get("tf_aux", 0.0))
+    aux_phys_weight = float(loss_cfg.get("physical_aux", 0.0))
 
     # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
     per_seed_nmse: dict[str, list[np.ndarray]] = {}
@@ -607,6 +620,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 aug_batch_dropout_prob=aug_batch_dropout_prob,
                 aug_dropped_token_fraction=aug_dropped_token_fraction,
                 aug_batch_shuffle_prob=aug_batch_shuffle_prob,
+                aux_tf_weight=aux_tf_weight,
+                aux_phys_weight=aux_phys_weight,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)

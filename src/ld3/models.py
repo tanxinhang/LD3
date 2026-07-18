@@ -283,21 +283,22 @@ def _build_quality_map(
 
     # --- Channel 1: mean token confidence ---
     valid_f = path_valid.to(dtype)
-    denom = valid_f.sum(dim=1).clamp_min(1.0)  # [B]
-    mean_conf = (path_tokens[:, :, 3].clamp(0.0, 1.0) * valid_f).sum(dim=1) / denom  # [B]
-    confidence_map = mean_conf[:, None, None, None].expand(batch, 1, N, M)  # [B, 1, N, M]
+    valid_count = valid_f.sum(dim=1)                           # [B] raw, no clamp
+    safe_denom = valid_count.clamp_min(1.0)                    # [B] for division safety
+    mean_conf = (path_tokens[:, :, 3].clamp(0.0, 1.0) * valid_f).sum(dim=1) / safe_denom
+    confidence_map = mean_conf[:, None, None, None].expand(batch, 1, N, M)
     confidence_map = confidence_map * 2.0 - 1.0  # map [0,1] → [-1, 1]
 
     # --- Channel 2: mean token uncertainty ---
     sigma_tau = path_tokens[:, :, 4]   # [B, L]
     sigma_nu = path_tokens[:, :, 5]    # [B, L]
-    uncertainty = (sigma_tau + sigma_nu).clamp(0.0, 2.0)  # per-token
-    mean_unc = (uncertainty * valid_f).sum(dim=1) / denom  # [B]
-    uncertainty_map = mean_unc[:, None, None, None].expand(batch, 1, N, M)  # [B, 1, N, M]
+    uncertainty = (sigma_tau + sigma_nu).clamp(0.0, 2.0)
+    mean_unc = (uncertainty * valid_f).sum(dim=1) / safe_denom
+    uncertainty_map = mean_unc[:, None, None, None].expand(batch, 1, N, M)
     uncertainty_map = uncertainty_map - 1.0  # center [0, 2] → [-1, 1]
 
-    # --- Channel 3: valid_ratio ---
-    valid_ratio = denom / float(path_tokens.shape[1])  # [B], fraction of valid slots
+    # --- Channel 3: valid_ratio (raw count, no clamp) ---
+    valid_ratio = valid_count / float(path_tokens.shape[1])    # 0 when all invalid
     valid_map = valid_ratio[:, None, None, None].expand(batch, 1, N, M)
     valid_map = valid_map * 2.0 - 1.0  # map [0, 1] → [-1, 1]
 
@@ -367,8 +368,11 @@ class PhysicalResidualEstimator(nn.Module):
         path_tokens: torch.Tensor,   # [B, L, 9]  with Re(α), Im(α)
         path_valid: torch.Tensor,    # [B, L]
         return_components: bool = False,
-        ablation_mode: str = "full",  # "full" | "fixed_blend_nores" | "spatial_nores" | "fixed_blend_res"
-        fixed_lam: float = 0.80,      # λ for fixed_blend modes
+        # --- Ablation controls (decoupled switches) ---
+        fusion_mode: str = "spatial",  # "spatial" | "fixed"
+        fixed_lam: float = 0.80,       # λ for fixed fusion
+        use_residual: bool = True,     # enable/disable ΔH
+        residual_coupling: str = "none",  # "none" | "gate" — gate-scales residual
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch, _, N, M = tf_input.shape
 
@@ -394,8 +398,8 @@ class PhysicalResidualEstimator(nn.Module):
 
         H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
 
-        # --- Gate × Residual 2×2 ablation ---
-        if ablation_mode.startswith("fixed_blend"):
+        # --- Ablation: fusion mode ---
+        if fusion_mode == "fixed":
             lam = fixed_lam
             H_fused = lam * H_phys + (1.0 - lam) * H_tf
             g = torch.full_like(g, lam)  # constant gate for diagnostics
@@ -404,14 +408,16 @@ class PhysicalResidualEstimator(nn.Module):
         residual_input = torch.cat([tf_features, H_fused], dim=1)
         delta = self.residual(residual_input)              # [B, 2, N, M]
 
-        if ablation_mode.endswith("_nores"):
-            H_out = H_fused  # no residual
-        else:
-            # Coupled residual: gate controls both blend AND correction.
-            # g→0: H_out = H_tf + 0 = H_tf (clean structural fallback)
-            # g→1: H_out = H_phys + delta (full physics + correction)
-            # This prevents residual from contributing when physics is shut off.
+        if not use_residual:
+            H_out = H_fused
+        elif residual_coupling == "gate":
+            # Gate-coupled: residual scaled by gate (v2 approach).
+            # g→0: H_out = H_tf, g→1: H_out = H_phys + delta
             H_out = H_fused + g * delta
+        else:
+            # Unscaled residual: ΔH always fully applied.
+            # This is the v1 default and the correct baseline for 2×2.
+            H_out = H_fused + delta
 
         # --- Diagnostics ---
         with torch.no_grad():
@@ -436,6 +442,9 @@ class PhysicalResidualEstimator(nn.Module):
         if return_components:
             diagnostics["H_phys"] = H_phys
             diagnostics["H_tf"] = H_tf
+            # Expert outputs for MoE auxiliary training
+            diagnostics["E_phys"] = H_phys + delta  # Physical expert
+            diagnostics["E_tf"] = H_tf              # TF expert
         return H_out, diagnostics
 
 
