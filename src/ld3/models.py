@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -247,12 +248,68 @@ class PhysicalReconstructor(nn.Module):
         return torch.stack([h_real, h_imag], dim=1)  # [B, 2, N, M]
 
 
+def _build_quality_map(
+    H_phys: torch.Tensor,      # [B, 2, N, M]
+    H_tf: torch.Tensor,        # [B, 2, N, M]
+    path_tokens: torch.Tensor, # [B, L, 9]
+    path_valid: torch.Tensor,  # [B, L]
+) -> torch.Tensor:
+    """Build 3-channel spatial quality map for token-conditioned gating.
+
+    Channels:
+      0: |H_phys - H_tf|²  — discrepancy map (locally normalized)
+      1: mean_token_confidence — expanded to spatial constant
+      2: mean_token_uncertainty — sigma_delay + sigma_doppler, expanded
+
+    The discrepancy channel is the most informative: it tells the gate
+    WHERE physics and learned TF disagree, enabling spatial gating.
+    The confidence/uncertainty channels tell the gate WHETHER to trust
+    physics at all — when all tokens are low-confidence, the gate can
+    globally reduce H_phys weight.
+
+    All channels are normalised to [-1, 1] or [0, 1] range for stable
+    CNN input alongside TF features.
+    """
+    batch, _, N, M = H_phys.shape
+    device = H_phys.device
+    dtype = H_phys.dtype
+
+    # --- Channel 0: |H_phys - H_tf|²  discrepancy ---
+    diff = (H_phys - H_tf).square().sum(dim=1, keepdim=True)  # [B, 1, N, M]
+    # Local normalisation: divide by per-sample mean for scale invariance
+    diff_mean = diff.mean(dim=(2, 3), keepdim=True).clamp_min(1e-8)
+    discrepancy = diff / diff_mean  # values in [0, ~∞), typically [0, 10]
+    discrepancy = torch.tanh(discrepancy * 0.5)  # soft clamp to [-1, 1]
+
+    # --- Channel 1: mean token confidence ---
+    valid_f = path_valid.to(dtype)
+    denom = valid_f.sum(dim=1).clamp_min(1.0)  # [B]
+    mean_conf = (path_tokens[:, :, 3].clamp(0.0, 1.0) * valid_f).sum(dim=1) / denom  # [B]
+    confidence_map = mean_conf[:, None, None, None].expand(batch, 1, N, M)  # [B, 1, N, M]
+    confidence_map = confidence_map * 2.0 - 1.0  # map [0,1] → [-1, 1]
+
+    # --- Channel 2: mean token uncertainty ---
+    sigma_tau = path_tokens[:, :, 4]   # [B, L]
+    sigma_nu = path_tokens[:, :, 5]    # [B, L]
+    uncertainty = (sigma_tau + sigma_nu).clamp(0.0, 2.0)  # per-token
+    mean_unc = (uncertainty * valid_f).sum(dim=1) / denom  # [B]
+    uncertainty_map = mean_unc[:, None, None, None].expand(batch, 1, N, M)  # [B, 1, N, M]
+    uncertainty_map = uncertainty_map - 1.0  # center [0, 2] → [-1, 1]
+
+    return torch.cat([discrepancy, confidence_map, uncertainty_map], dim=1)  # [B, 3, N, M]
+
+
 class PhysicalResidualEstimator(nn.Module):
-    """TF–DD gated residual estimator — Gate 1-D1 target architecture.
+    """TF–DD gated residual estimator — Gate 1-D1 / Gate 2-C target architecture.
 
     H_phys = PhysicalReconstructor(path_tokens)     ← explicit physics
     H_tf   = TFEncoder(tf_input)                     ← learned TF refinement
     Ĥ = g ⊙ H_phys + (1−g) ⊙ H_tf + ΔH              ← gated fusion
+
+    When use_quality_gate=True (Gate 2-C), the gate additionally receives
+    a 3-channel token-quality map: discrepancy |H_phys-H_tf|², mean token
+    confidence, and mean token uncertainty. This lets the gate learn to
+    reject the physics branch when token quality is poor.
     """
 
     def __init__(
@@ -260,8 +317,10 @@ class PhysicalResidualEstimator(nn.Module):
         hidden_dim: int = 48,
         num_subcarriers: int = 64,
         num_symbols: int = 14,
+        use_quality_gate: bool = False,
     ) -> None:
         super().__init__()
+        self.use_quality_gate = use_quality_gate
         self.tf_encoder = TFEncoder(hidden_dim)
         self.physics = PhysicalReconstructor(num_subcarriers, num_symbols)
 
@@ -272,9 +331,11 @@ class PhysicalResidualEstimator(nn.Module):
             nn.Conv2d(hidden_dim, 2, 1),
         )
 
-        # Fusion gate: learns where to trust physics vs TF
+        # Fusion gate: learns where to trust physics vs TF.
+        # Gate 2-C adds 3 quality channels → H+4 → H+7.
+        gate_in_channels = hidden_dim + 4 + (3 if use_quality_gate else 0)
         self.gate = nn.Sequential(
-            nn.Conv2d(hidden_dim + 4, hidden_dim // 2, 1),
+            nn.Conv2d(gate_in_channels, hidden_dim // 2, 1),
             nn.GELU(),
             nn.Conv2d(hidden_dim // 2, 1, 1),
             nn.Sigmoid(),
@@ -305,7 +366,11 @@ class PhysicalResidualEstimator(nn.Module):
         H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
 
         # 3. Gated fusion
-        gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)  # [B, H+4, N, M]
+        if self.use_quality_gate:
+            quality_map = _build_quality_map(H_phys, H_tf, path_tokens, path_valid)
+            gate_input = torch.cat([tf_features, H_phys, H_tf, quality_map], dim=1)
+        else:
+            gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
         g = self.gate(gate_input)                          # [B, 1, N, M]
         H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
 

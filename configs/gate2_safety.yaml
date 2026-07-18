@@ -1,0 +1,53 @@
+# Gate 2-C: Quality-conditioned spatial gate training config
+#
+# Same setup as gate1_estimated (K=4, 10 dB, ρ=0.125, estimated tokens)
+# but with use_quality_gate=True — the gate receives explicit token
+# quality signals (discrepancy map, confidence, uncertainty).
+#
+# Target: null_all NMSE within ±0.3 dB of TF-only.
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_safety.yaml \
+#     --output-dir results/gate2_safety \
+#     --device cuda
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2
+  token_source: estimated
+
+training:
+  epochs: 300
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 3
+  use_quality_gate: true
