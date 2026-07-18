@@ -197,7 +197,7 @@ class LogisticQualityGate:
             # Loss: mean NMSE over samples
             losses = np.zeros(n_samp)
             dq_dz = q * (1.0 - q)  # [n_samp]
-            grad_w = np.zeros(3)
+            grad_w = np.zeros(len(w))
             grad_b = 0.0
 
             for i in range(n_samp):
