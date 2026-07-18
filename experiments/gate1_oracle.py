@@ -259,6 +259,9 @@ def train_model(
     aug_batch_dropout_prob: float = 0.0,
     aug_dropped_token_fraction: float = 0.3,
     aug_batch_shuffle_prob: float = 0.0,
+    aug_phase_prob: float = 0.0,
+    aug_jitter_std: float = 0.0,
+    aug_coherent_false: int = 0,
     aux_tf_weight: float = 0.0,
     aux_phys_weight: float = 0.0,
     gate_sup_weight: float = 0.0,
@@ -307,6 +310,62 @@ def train_model(
                         perm = torch.randperm(pt.shape[0], device=device)
                         pt = pt[perm]
                         pv = pv[perm]
+
+                    # --- Matched corruption (per-sample, independent random draws) ---
+                    B, L, D = pt.shape
+
+                    # Gain phase perturbation: rotate Re/Im gains
+                    if aug_phase_prob > 0:
+                        for b in range(B):
+                            if torch.rand(1).item() < aug_phase_prob:
+                                v = pv[b]
+                                if v.sum() == 0: continue
+                                # Random phase per valid token in this sample
+                                phi = (torch.rand(L, device=device) * 2 - 1) * 3.14159  # [-pi, pi]
+                                re = pt[b, :, 7].clone()
+                                im = pt[b, :, 8].clone()
+                                cos_p = torch.cos(phi)
+                                sin_p = torch.sin(phi)
+                                pt[b, :, 7] = re * cos_p - im * sin_p
+                                pt[b, :, 8] = re * sin_p + im * cos_p
+
+                    # Location jitter: perturb delay/doppler of valid tokens
+                    if aug_jitter_std > 0:
+                        for b in range(B):
+                            v_idx = torch.nonzero(pv[b], as_tuple=False).squeeze(-1)
+                            if v_idx.shape[0] == 0: continue
+                            jitter = torch.randn(v_idx.shape[0], device=device) * aug_jitter_std
+                            pt[b, v_idx, 0] += jitter  # delay
+                            pt[b, v_idx, 0].clamp_(0, 12)
+                            jitter = torch.randn(v_idx.shape[0], device=device) * aug_jitter_std
+                            pt[b, v_idx, 1] += jitter  # doppler
+                            pt[b, v_idx, 1].clamp_(-3, 3)
+
+                    # Coherent false tokens: inject near the strongest valid token
+                    if aug_coherent_false > 0:
+                        for b in range(B):
+                            v_idx = torch.nonzero(pv[b], as_tuple=False).squeeze(-1)
+                            if v_idx.shape[0] == 0: continue
+                            # Find free slots
+                            free_idx = torch.nonzero(~pv[b], as_tuple=False).squeeze(-1)
+                            n_inject = min(aug_coherent_false, free_idx.shape[0])
+                            if n_inject == 0: continue
+                            # Use strongest valid token as anchor
+                            anchor_idx = v_idx[0]  # tokens sorted by power
+                            for k in range(n_inject):
+                                fi = free_idx[k]
+                                pt[b, fi, 0] = pt[b, anchor_idx, 0] + (torch.rand(1, device=device)*2-1)*0.5
+                                pt[b, fi, 1] = pt[b, anchor_idx, 1] + (torch.rand(1, device=device)*2-1)*0.5
+                                pt[b, fi, 0].clamp_(0, 12)
+                                pt[b, fi, 1].clamp_(-3, 3)
+                                pt[b, fi, 2] = pt[b, anchor_idx, 2] * 0.3
+                                pt[b, fi, 3] = 0.3
+                                pt[b, fi, 4] = 0.5
+                                pt[b, fi, 5] = 0.5
+                                pt[b, fi, 6] = 0.3
+                                pt[b, fi, 7] = pt[b, anchor_idx, 7] * 0.4
+                                pt[b, fi, 8] = pt[b, anchor_idx, 8] * 0.4
+                                pv[b, fi] = True
 
                 want_experts = (aux_tf_weight > 0 or aux_phys_weight > 0 or gate_sup_weight > 0)
                 if model_type == "physical_residual" and want_experts:
@@ -532,6 +591,9 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
     aug_dropped_token_fraction = float(aug_cfg.get("dropped_token_fraction", 0.3))
     aug_batch_shuffle_prob = float(aug_cfg.get("batch_shuffle_prob", 0.0))
+    aug_phase_prob = float(aug_cfg.get("phase_prob", 0.0))
+    aug_jitter_std = float(aug_cfg.get("jitter_std", 0.0))
+    aug_coherent_false = int(aug_cfg.get("coherent_false", 0))
     loss_cfg = training.get("loss_weights", {})
     aux_tf_weight = float(loss_cfg.get("tf_aux", 0.0))
     aux_phys_weight = float(loss_cfg.get("physical_aux", 0.0))
@@ -649,6 +711,9 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 aug_batch_dropout_prob=aug_batch_dropout_prob,
                 aug_dropped_token_fraction=aug_dropped_token_fraction,
                 aug_batch_shuffle_prob=aug_batch_shuffle_prob,
+                aug_phase_prob=aug_phase_prob,
+                aug_jitter_std=aug_jitter_std,
+                aug_coherent_false=aug_coherent_false,
                 aux_tf_weight=aux_tf_weight,
                 aux_phys_weight=aux_phys_weight,
                 gate_sup_weight=gate_sup_weight,
