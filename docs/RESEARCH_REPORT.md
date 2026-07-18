@@ -471,30 +471,39 @@ Four baselines using the SAME frozen H_phys and H_Tf from the Gate 2-C model.
 | Fixed blend (λ=0.80) | **−9.15** | 1 | No |
 | Hard switch | −5.52 | 1 | No |
 | Logistic quality gate | −9.04 | 3 | Light |
-| Hold-out pilot select | −8.27 | 0 | No |
-| **Spatial quality gate (Gate 2-C)** | **−10.45** | CNN | Yes |
+| Hold-out pilot (hard) | −8.27 | 0 | No |
+| Soft hold-out blend (T=5) | −9.06 | 1 | No |
+| **2×2 ablation** | | | |
+| Fixed λ, no ΔH | −9.15 | 1 | No |
+| Spatial gate, no ΔH | −8.63 | CNN | Yes |
+| Fixed λ + ΔH | **−10.17** | CNN | No |
+| Spatial gate + ΔH | **−10.45** | CNN | Yes |
 
 **Key findings:**
 
 1. **Fusion gain = mostly scalar blending.** Fixed blend (λ=0.80, 1 parameter,
-   no training) achieves −9.15 dB — within 1.30 dB of the full model
-   (−10.45 dB). The physics branch dominates at 80% weight.
+   no training) achieves −9.15 dB — within 1.30 dB of the full model.
 
-2. **Global quality features provide negligible clean-condition gain.**
-   Logistic quality gate (−9.04 dB) is 0.11 dB *worse* than fixed blend
-   (−9.15 dB). The difference is within noise — scalar quality features
-   add no discriminative power beyond a single blend ratio in clean
-   conditions. Corruption-detection value must be assessed separately.
+2. **2×2 ablation: residual ΔH does 78% of the work. Spatial gating alone
+   is worse than fixed blend.**
+   ```
+   G_spatial      = −0.52 dB  (spatial gate alone HARMFUL — discards info)
+   G_residual     = +1.02 dB  (zero-init residual is the main contributor)
+   G_spatial|res  = +0.28 dB  (marginal spatial gain given residual)
+   G_total        = +1.30 dB
+   ```
+   The spatial gate does not directly improve reconstruction. It selectively
+   suppresses the physics branch, creating room for the zero-init residual to
+   correct. This is a qualitatively different mechanism from "learning WHERE
+   to trust physics."
 
-3. **Spatial gating + residual ΔH = +1.30 dB, not pure spatial gating.**
-   The gap from Fixed blend (no spatial gate, no ΔH) to the full model
-   (spatial gate + ΔH) is +1.30 dB. A gate–residual 2×2 factorial
-   ablation is required to isolate the contributions.
+3. **Scalar quality/heuristic features add no clean-condition gain.**
+   Logistic quality gate (−9.04 dB, 0.11 dB worse) and soft hold-out blend
+   (−9.06 dB, 0.09 dB better) are both within noise of fixed blend.
+   Corruption-detection value TBD.
 
-4. **Hard selection rules lose information vs soft blending.** Hard switch
-   (−5.52 dB) and hold-out pilot selector (−8.27 dB) underperform fixed
-   blend. A soft hold-out variant should be tested before concluding
-   hold-out verification has no value.
+4. **Hard selection loses information.** Hard switch (−5.52 dB) and hard
+   hold-out (−8.27 dB) underperform soft blending.
 
 See `docs/GATE2_DESIGN.md` §11.6 for complete analysis and paper narrative
 implications.
@@ -541,7 +550,12 @@ Gate 2-D1   Fixed blend baseline ........................ PASS (−9.15 dB, 1 pa
 Gate 2-D2   Hard discrepancy switch ..................... PASS (−5.52 dB, below TF-only)
 Gate 2-D3   Logistic quality gate ....................... PASS (−9.04 dB, 3 params)
 Gate 2-D4   Hold-out pilot selector ..................... PASS (−8.27 dB, no training)
-Gate 2-D5   Spatial gate vs fixed blend ................. +1.30 dB (genuine spatial gain)
+Gate 2-D1   Fixed blend baseline ........................ PASS (−9.15 dB, 1 param)
+Gate 2-D2   Soft hold-out blend ......................... PASS (−9.06 dB, T=5)
+Gate 2-D3   Logistic quality gate ....................... PASS (−9.04 dB, 3 params)
+Gate 2-D4   2×2: Spatial gate alone ..................... −0.52 dB (HARMFUL without ΔH)
+Gate 2-D5   2×2: Residual ΔH alone ...................... +1.02 dB (78% of total gain)
+Gate 2-D6   2×2: Spatial gate given residual ............ +0.28 dB (marginal)
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```

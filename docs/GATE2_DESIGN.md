@@ -488,50 +488,71 @@ H_Tf from the Gate 2-C model.  717 test samples, hyperparameters optimised on
 | H_phys-only | −8.50 | 0 | No | Deployable DD-estimated physics baseline |
 | TF-only (standalone) | −5.06 | CNN | Yes | Lower bound (no DD prior) |
 | Fixed blend (λ=0.80) | **−9.15** | 1 | No | 80% physics + 20% TF |
-| Hard switch | −5.52 | 1 | No | Threshold on |H_phys−H_TF|² |
-| Logistic quality gate | −9.04 | 3 | Light | 0.11 dB worse than fixed blend (within noise) |
-| Hold-out pilot select | −8.27 | 0 | No | Split pilots, pick min check residual |
-| **Spatial quality gate** | **−10.45** | CNN | Yes | Gate 2-C: spatial gate + residual ΔH |
+| Hard switch | −5.52 | 1 | No | Binary selection loses information |
+| Logistic quality gate | −9.04 | 3 | Light | 0.11 dB worse than fixed blend |
+| Hold-out pilot (hard) | −8.27 | 0 | No | Pilot split penalty > selection gain |
+| Soft hold-out blend (T=5) | −9.06 | 1 | No | Check residual → weak signal |
+| **2x2 ablation** | | | | |
+| Fixed λ, no ΔH | −9.15 | 1 | No | Baseline |
+| Spatial gate, no ΔH | −8.63 | CNN | Yes | Spatial gate alone HARMFUL |
+| Fixed λ + ΔH | **−10.17** | CNN | No | Residual = +1.02 dB (78%) |
+| Spatial gate + ΔH | **−10.45** | CNN | Yes | +0.28 dB marginal spatial gain |
 
 **Key findings:**
 
 1. **The bulk of fusion gain comes from simple scalar blending.**
    Fixed blend (λ=0.80, 1 parameter, no training) achieves −9.15 dB —
-   within 1.30 dB of the full spatial quality gate (−10.45 dB) and
-   +4.09 dB over TF-only. The physics branch dominates (80% weight).
+   within 1.30 dB of the full model (−10.45 dB) and +4.09 dB over
+   TF-only.
 
-2. **Global quality features provide negligible clean-condition NMSE gain
-   when compressed into a single scalar.** Logistic quality gate (−9.04 dB)
-   is 0.11 dB *worse* than the validation-tuned fixed blend (−9.15 dB).
-   The difference is within noise — at the scalar level, the three quality
-   features add no discriminative power beyond a single blend ratio.
-   q_mean ≈ 0.80 confirms the model is essentially learning λ = 0.80.
-   **Their corruption-detection value must be assessed separately via a
-   full corruption sweep on all mechanism baselines.**
+2. **Global quality features provide negligible clean-condition gain.**
+   Logistic quality gate (−9.04 dB) is 0.11 dB *worse* than fixed blend.
+   Soft hold-out blend (−9.06 dB) is 0.09 dB better than fixed blend.
+   Both differences are within noise — scalar quality/heuristic features
+   add no discriminative power beyond a single blend ratio in clean
+   conditions. **Corruption-detection value TBD.**
 
-3. **Spatial gating + residual ΔH improves +1.30 dB over fixed blend.**
-   The gap from Fixed blend (−9.15, no spatial gate, no residual) to the
-   full model (−10.45, spatial gate + zero-init ΔH) is +1.30 dB.
-   **A gate–residual 2×2 factorial ablation is required to isolate the
-   pure spatial-gating contribution from the residual correction
-   contribution.** The fixed blend is a post-hoc baseline on frozen model
-   branches; an end-to-end fixed-blend model trained from scratch would
-   provide the fairest comparison.
+3. **2×2 ablation: residual ΔH does 78% of the work. Spatial gating
+   alone is worse than fixed blend.** Decomposing the +1.30 dB total:
 
-4. **"Clever" non-learned baselines underperform simple blending.** Hard
-   switch (−5.52 dB, barely above TF-only) and hold-out pilot selector
-   (−8.27 dB, below H_phys-only) fail because binary selection loses
-   information. Also, the hold-out selector splits pilots, reducing the
-   effective estimation budget. **A soft hold-out blend (check-pilot
-   residual as softmax temperature) should be tested before concluding
-   that hold-out verification has no value.**
+   | Mode | NMSE | Δ from baseline |
+   |---|---|---|
+   | Fixed λ, no ΔH (baseline) | −9.15 dB | — |
+   | Spatial gate, no ΔH | −8.63 dB | **−0.52 dB** ← spatial gate alone HARMFUL |
+   | Fixed λ + ΔH | −10.17 dB | **+1.02 dB** ← residual does 78% of work |
+   | Spatial gate + ΔH | −10.45 dB | **+1.30 dB** ← full model |
 
-**Five-layer decomposition:**
+   Decomposition:
+   ```
+   G_spatial      = −0.52 dB  (spatial gate alone harms performance)
+   G_residual     = +1.02 dB  (zero-init residual is the main contributor)
+   G_spatial|res  = +0.28 dB  (marginal spatial gain given residual)
+   G_total        = +1.30 dB
+   ```
+
+   **Interpretation**: spatial gating does not directly improve
+   reconstruction — it selectively suppresses the physics branch, creating
+   "room" for the zero-init residual to correct. Without residual, gating
+   merely discards information. The residual's zero-init bias toward
+   H_phys means it starts from physics and learns to fix regions where
+   gating reduces physics weight. This is a qualitatively different
+   mechanism than "learning WHERE to trust physics."
+
+4. **Soft hold-out blend (−9.06 dB) slightly outperforms fixed blend
+   (−9.15 dB).** Check-pilot residual carries weak but non-zero signal
+   about branch quality. However, the +0.09 dB gain is negligible compared
+   to the residual network's +1.02 dB.
+
+5. **Hard selection rules lose information.** Hard switch (−5.52 dB) and
+   hard hold-out selector (−8.27 dB) underperform because binary choice
+   discards the complementary information in the other branch.
+
+**Revised five-layer decomposition:**
 
 | Layer | Transition | Δ NMSE | Mechanism |
 |---|---|---|---|
 | 1 | TF-only → H_phys-only | +3.44 dB | DD physical prior |
 | 2 | H_phys-only → Fixed blend | +0.65 dB | Soft fusion synergy |
-| 3 | Fixed blend → Logistic gate | −0.11 dB | Scalar quality = no clean gain |
-| 4 | Fixed blend → Spatial gate + ΔH | +1.30 dB | Spatial gating + residual (to be split) |
-| 5 | Spatial gate → + Hard fallback | — | Structural null_all safety (±0.18 dB) |
+| 3 | Fixed blend → Scalar quality/heuristic | ~0 dB | No clean-condition gain |
+| 4 | Fixed blend → Fixed blend + ΔH | **+1.02 dB** | Zero-init residual (main contributor) |
+| 5 | Fixed blend + ΔH → Spatial gate + ΔH | **+0.28 dB** | Spatial gating given residual |
