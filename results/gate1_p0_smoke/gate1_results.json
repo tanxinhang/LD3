@@ -1,0 +1,292 @@
+{
+  "device": "cpu",
+  "config": {
+    "seed": 2036,
+    "device": "cpu",
+    "ofdm": {
+      "num_subcarriers": 64,
+      "num_symbols": 14,
+      "subcarrier_spacing_hz": 120000.0,
+      "carrier_frequency_hz": 28000000000.0,
+      "cp_ratio": 0.07
+    },
+    "channel": {
+      "num_paths": 4,
+      "max_delay_bins": 12.0,
+      "max_abs_doppler_bins": 3.0,
+      "fractional_delay": true,
+      "fractional_doppler": true,
+      "exponential_power_decay": 0.25
+    },
+    "dataset": {
+      "train_size": 4096,
+      "test_size": 1024,
+      "val_size": 1024,
+      "snr_min_db": 10.0,
+      "snr_max_db": 10.0,
+      "pilot_density": 0.125,
+      "pilot_pattern": "random",
+      "max_paths": 8,
+      "token_version": 2,
+      "token_source": "estimated"
+    },
+    "training": {
+      "epochs": 1,
+      "batch_size": 64,
+      "learning_rate": 0.001,
+      "weight_decay": 1e-05,
+      "hidden_dim": 48,
+      "num_threads": 4,
+      "num_seeds": 1
+    }
+  },
+  "test_bank_seed": 12036,
+  "non_learned_baselines": {
+    "test": {
+      "nmse_oracle_perfect": {
+        "nmse_linear": 0.0,
+        "nmse_db": -Infinity,
+        "nmse_std": 0.0,
+        "n_samples": 1024
+      },
+      "nmse_oracle_support_ls": {
+        "nmse_linear": 0.003724953622346663,
+        "nmse_db": -24.288791300792628,
+        "nmse_std": 0.001855786296417823,
+        "n_samples": 1024
+      },
+      "nmse_estimated_support_ls": {
+        "nmse_linear": 0.14585564433370157,
+        "nmse_db": -8.360767598535297,
+        "nmse_std": 0.06520286302256628,
+        "n_samples": 1024
+      },
+      "nmse_initial_interpolation": {
+        "nmse_linear": 0.7232404279789493,
+        "nmse_db": -1.4071730548977157,
+        "nmse_std": 0.23633645900131586,
+        "n_samples": 1024
+      }
+    }
+  },
+  "seeds": {
+    "seed_2036": {
+      "tf_only": {
+        "history": [
+          {
+            "epoch": 1.0,
+            "train_nmse": 0.6060261619277298,
+            "val_nmse": 0.524254560470581,
+            "best": true
+          }
+        ],
+        "test": {
+          "token_mode": "oracle",
+          "nmse_linear": 0.5214911103248596,
+          "nmse_db": -2.827530860900879,
+          "initial_nmse_db": -1.4071729183197021,
+          "inference_seconds": 10.058039000025019,
+          "samples": 1024
+        },
+        "evaluations": {
+          "oracle": {
+            "token_mode": "oracle",
+            "nmse_linear": 0.5214911103248596,
+            "nmse_db": -2.827530860900879,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 10.058039000025019,
+            "samples": 1024
+          }
+        },
+        "parameters": 25058
+      },
+      "ammse": {
+        "history": [
+          {
+            "epoch": 1.0,
+            "train_nmse": 0.5990335009992123,
+            "val_nmse": 0.5042527858167887,
+            "best": true
+          }
+        ],
+        "test": {
+          "token_mode": "oracle",
+          "nmse_linear": 0.5014745593070984,
+          "nmse_db": -2.9975109100341797,
+          "initial_nmse_db": -1.4071729183197021,
+          "inference_seconds": 1.0179448999697343,
+          "samples": 1024
+        },
+        "evaluations": {
+          "oracle": {
+            "token_mode": "oracle",
+            "nmse_linear": 0.5014745593070984,
+            "nmse_db": -2.9975109100341797,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 1.0179448999697343,
+            "samples": 1024
+          }
+        },
+        "parameters": 41234
+      },
+      "d2an": {
+        "history": [
+          {
+            "epoch": 1.0,
+            "train_nmse": 0.5013484330847859,
+            "val_nmse": 0.41924637742340565,
+            "best": true
+          }
+        ],
+        "test": {
+          "token_mode": "oracle",
+          "nmse_linear": 0.41618719696998596,
+          "nmse_db": -3.8071129322052,
+          "initial_nmse_db": -1.4071729183197021,
+          "inference_seconds": 0.4230002000113018,
+          "samples": 1024
+        },
+        "evaluations": {
+          "oracle": {
+            "token_mode": "oracle",
+            "nmse_linear": 0.41618719696998596,
+            "nmse_db": -3.8071129322052,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.4230002000113018,
+            "samples": 1024
+          }
+        },
+        "parameters": 90194
+      },
+      "physics_cross_attention": {
+        "history": [
+          {
+            "epoch": 1.0,
+            "train_nmse": 0.6176796872168779,
+            "val_nmse": 0.5108982417732477,
+            "best": true
+          }
+        ],
+        "test": {
+          "token_mode": "oracle",
+          "nmse_linear": 0.5097284317016602,
+          "nmse_db": -2.9266114234924316,
+          "initial_nmse_db": -1.4071729183197021,
+          "inference_seconds": 0.309471599990502,
+          "samples": 1024,
+          "mean_null_attention": 0.7014472484588623,
+          "mean_gate": 0.6233960390090942
+        },
+        "evaluations": {
+          "oracle": {
+            "token_mode": "oracle",
+            "nmse_linear": 0.5097284317016602,
+            "nmse_db": -2.9266114234924316,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.309471599990502,
+            "samples": 1024,
+            "mean_null_attention": 0.7014472484588623,
+            "mean_gate": 0.6233960390090942
+          },
+          "shuffled": {
+            "token_mode": "shuffled",
+            "nmse_linear": 0.5394503474235535,
+            "nmse_db": -2.680485248565674,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.3244038999546319,
+            "samples": 1024,
+            "mean_null_attention": 0.701388418674469,
+            "mean_gate": 0.6233959794044495
+          },
+          "null": {
+            "token_mode": "null",
+            "nmse_linear": 0.5273461937904358,
+            "nmse_db": -2.7790417671203613,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.32199809997109696,
+            "samples": 1024,
+            "mean_null_attention": 1.0,
+            "mean_gate": 0.609435498714447
+          }
+        },
+        "parameters": 36151
+      },
+      "physics_residual": {
+        "history": [
+          {
+            "epoch": 1.0,
+            "train_nmse": 0.16358241147827357,
+            "val_nmse": 0.1379656381905079,
+            "best": true
+          }
+        ],
+        "test": {
+          "token_mode": "oracle",
+          "nmse_linear": 0.13633811473846436,
+          "nmse_db": -8.653827667236328,
+          "initial_nmse_db": -1.4071729183197021,
+          "inference_seconds": 0.3168701999820769,
+          "samples": 1024
+        },
+        "evaluations": {
+          "oracle": {
+            "token_mode": "oracle",
+            "nmse_linear": 0.13633811473846436,
+            "nmse_db": -8.653827667236328,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.3168701999820769,
+            "samples": 1024
+          },
+          "shuffled": {
+            "token_mode": "shuffled",
+            "nmse_linear": 1.5573272705078125,
+            "nmse_db": 1.92379891872406,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.3181857999879867,
+            "samples": 1024
+          },
+          "null": {
+            "token_mode": "null",
+            "nmse_linear": 1.3868151903152466,
+            "nmse_db": 1.4201858043670654,
+            "initial_nmse_db": -1.4071729183197021,
+            "inference_seconds": 0.3283934000064619,
+            "samples": 1024
+          }
+        },
+        "parameters": 48101
+      },
+      "oracle_cross_attention_gain_db": 0.09908056259155273,
+      "oracle_vs_shuffled_gain_db": 0.2461261749267578,
+      "oracle_vs_null_gain_db": 0.1475696563720703
+    }
+  },
+  "gate_1_status": {
+    "gate_1A_physical_closure": {
+      "status": "PASS",
+      "nmse_oracle_perfect_db": -Infinity,
+      "note": "Should approach numerical precision (~ -100 dB in float64). If > -80 dB, check delay/Doppler sign convention, normalisation, or path truncation."
+    },
+    "gate_1B_oracle_support_value": {
+      "status": "READY",
+      "nmse_oracle_support_ls_db": -24.288791300792628,
+      "nmse_initial_db": -1.4071730548977157,
+      "gain_over_initial_db": 22.881618245894913,
+      "note": "Oracle support + LS vs nearest-neighbour interpolation. Positive gain means true DD locations add value with estimated gains."
+    },
+    "gate_1C_estimated_support_value": {
+      "status": "READY",
+      "nmse_estimated_support_ls_db": -8.360767598535297,
+      "delta_support_db": -15.928023702257331,
+      "note": "DD-estimated support + LS vs Oracle support + LS. \u0394_support measures the cost of using DD-estimated (not true) locations."
+    },
+    "gate_1D0_legacy_cross_attention": {
+      "status": "FAIL",
+      "note": "Legacy softmax cross-attention. Token-use audit confirms DD prior dependence, but DD+LS baseline is consistently better."
+    },
+    "gate_1D1_physical_residual": {
+      "status": "PASS",
+      "note": "PhysicalResidualEstimator with complex-gain tokens (9-dim), explicit H_phys reconstruction, and TF residual gated fusion. Target: surpass DD+LS baseline (\u22128.4 dB)."
+    }
+  }
+}
