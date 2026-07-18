@@ -17,6 +17,7 @@ from .dd_estimation import (
 from .oracle import (
     compute_path_quality,
     estimated_path_tokens_v2,
+    estimated_path_tokens_v3,
     oracle_path_tokens,
     oracle_path_tokens_v2,
 )
@@ -125,14 +126,26 @@ class SyntheticOFDMISACDataset(Dataset):
                     est, g_hat, observed, mask, score_map,
                     self.ofdm.num_subcarriers, self.ofdm.num_symbols,
                 )
-                tokens, valid = estimated_path_tokens_v2(
-                    est, g_hat, self.cfg.max_paths,
-                    confidence=conf, sigma_tau=sig_t,
-                    sigma_nu=sig_n, relevance=rel,
-                )
+                if self.cfg.token_version >= 3:
+                    tokens, valid = estimated_path_tokens_v3(
+                        est, g_hat, self.cfg.max_paths,
+                        score_map, gain_map, grid.delay_bins, grid.doppler_bins,
+                        confidence=conf, sigma_tau=sig_t,
+                        sigma_nu=sig_n, relevance=rel,
+                    )
+                else:
+                    tokens, valid = estimated_path_tokens_v2(
+                        est, g_hat, self.cfg.max_paths,
+                        confidence=conf, sigma_tau=sig_t,
+                        sigma_nu=sig_n, relevance=rel,
+                    )
             else:
-                # No paths detected — truly empty tokens, no Oracle leak
-                dim = 9 if self.cfg.token_version >= 2 else 7
+                # No paths detected — empty tokens, no Oracle leak
+                if self.cfg.token_version >= 3:
+                    patch_size = (2 * 2 + 1) ** 2  # R=2 → 25
+                    dim = 9 + patch_size + 2 * patch_size  # 84
+                else:
+                    dim = 9 if self.cfg.token_version >= 2 else 7
                 tokens = np.zeros((self.cfg.max_paths, dim), dtype=np.float32)
                 valid = np.zeros(self.cfg.max_paths, dtype=bool)
         elif self.cfg.token_version >= 2:

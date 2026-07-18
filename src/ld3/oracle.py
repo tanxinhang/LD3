@@ -205,6 +205,130 @@ def estimated_path_tokens_v2(
 
 
 # ---------------------------------------------------------------------------
+# DD local patch extraction (token v3 enhancement)
+# ---------------------------------------------------------------------------
+
+
+def _nearest_grid_index(value: float, bins: np.ndarray) -> int:
+    """Nearest-neighbour grid index for a continuous bin value."""
+    return int(np.argmin(np.abs(bins - value)))
+
+
+def _extract_dd_patch(
+    score_map: np.ndarray,       # [n_delay, n_doppler]
+    gain_map: np.ndarray,        # [n_delay, n_doppler] complex
+    grid_delay: np.ndarray,      # [n_delay]
+    grid_doppler: np.ndarray,    # [n_doppler]
+    tau: float,
+    nu: float,
+    radius: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Extract (2R+1)×(2R+1) local patches around DD peak position.
+
+    Returns (score_patch_flat, gain_patch_flat) each of length (2R+1)².
+    Doppler is handled with periodic wrapping.
+    """
+    i0 = _nearest_grid_index(tau, grid_delay)
+    j0 = _nearest_grid_index(nu, grid_doppler)
+
+    n_delay = len(grid_delay)
+    n_doppler = len(grid_doppler)
+
+    i_start = max(0, i0 - radius)
+    i_end = min(n_delay, i0 + radius + 1)
+
+    # Doppler with wrapping
+    j_indices = np.arange(j0 - radius, j0 + radius + 1)
+    j_wrapped = np.mod(j_indices, n_doppler)
+
+    patch_size = (2 * radius + 1) ** 2
+
+    # Score patch (pad with zeros for out-of-bounds regions)
+    score_patch = np.zeros(patch_size, dtype=np.float32)
+    si = 0
+    di = i0 - radius - i_start  # offset in delay dimension for centering
+    dj = j0 - radius
+    for ii in range(i_start, i_end):
+        for jj_idx, jj in enumerate(j_wrapped):
+            patch_idx = (ii - i_start) * (2 * radius + 1) + jj_idx
+            score_patch[patch_idx] = score_map[ii, jj]
+            si += 1
+
+    # Gain patch (real + imag separated)
+    gain_patch = np.zeros(patch_size * 2, dtype=np.float32)
+    for ii in range(i_start, i_end):
+        for jj_idx, jj in enumerate(j_wrapped):
+            patch_idx = (ii - i_start) * (2 * radius + 1) + jj_idx
+            g = gain_map[ii, jj]
+            gain_patch[patch_idx] = float(g.real)
+            gain_patch[patch_idx + patch_size] = float(g.imag)
+
+    return score_patch, gain_patch
+
+
+def estimated_path_tokens_v3(
+    est: EstimatedPaths,
+    ls_gains: np.ndarray,
+    max_paths: int,
+    score_map: np.ndarray,
+    gain_map: np.ndarray,
+    grid_delay: np.ndarray,
+    grid_doppler: np.ndarray,
+    confidence: np.ndarray | None = None,
+    sigma_tau: np.ndarray | None = None,
+    sigma_nu: np.ndarray | None = None,
+    relevance: np.ndarray | None = None,
+    patch_radius: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Create enhanced tokens from DD-estimated support + local DD spectrum patches.
+
+    Token fields (9 base + (2R+1)² score + 2*(2R+1)² gain = 9+25+50=84 for R=2):
+      0-8: same 9-dim as v2 (τ, ν, power, confidence, σ_τ, σ_ν, relevance, Re(α), Im(α))
+      9-33: (2R+1)² score_map patch around peak (flattened)
+      34-83: 2*(2R+1)² gain_map patch (real then imag, flattened)
+
+    The local patches tell the model:
+      - Peak sharpness (localisation confidence)
+      - Nearby competitors / sidelobes (coherent false path risk)
+      - DD energy distribution around the detected location
+    """
+    patch_size = (2 * patch_radius + 1) ** 2
+    token_dim = 9 + patch_size + 2 * patch_size  # 9 + score + gain
+
+    tokens = np.zeros((max_paths, token_dim), dtype=np.float32)
+    valid = np.zeros(max_paths, dtype=bool)
+    n_paths = min(max_paths, len(est.delay_bins))
+    order = np.argsort(np.abs(ls_gains))[::-1][:n_paths]
+
+    # Base 9-dim fields (same as v2)
+    tokens[:n_paths, 0] = est.delay_bins[order]
+    tokens[:n_paths, 1] = est.doppler_bins[order]
+    power = np.abs(ls_gains[order]) ** 2
+    total_p = np.sum(power)
+    tokens[:n_paths, 2] = power / max(total_p, np.finfo(float).eps)
+    tokens[:n_paths, 3] = confidence[order] if confidence is not None else 0.7
+    tokens[:n_paths, 4] = sigma_tau[order] if sigma_tau is not None else 0.2
+    tokens[:n_paths, 5] = sigma_nu[order] if sigma_nu is not None else 0.1
+    tokens[:n_paths, 6] = relevance[order] if relevance is not None else 1.0
+    tokens[:n_paths, 7] = ls_gains[order].real.astype(np.float32)
+    tokens[:n_paths, 8] = ls_gains[order].imag.astype(np.float32)
+
+    # DD local patches per path
+    for l in range(n_paths):
+        tau = est.delay_bins[order[l]]
+        nu = est.doppler_bins[order[l]]
+        score_patch, gain_patch = _extract_dd_patch(
+            score_map, gain_map, grid_delay, grid_doppler,
+            tau, nu, radius=patch_radius,
+        )
+        tokens[l, 9:9 + patch_size] = score_patch
+        tokens[l, 9 + patch_size:9 + patch_size + 2 * patch_size] = gain_patch
+
+    valid[:n_paths] = True
+    return tokens, valid
+
+
+# ---------------------------------------------------------------------------
 # Oracle parametric reconstruction (upper bound / code-closure test)
 # ---------------------------------------------------------------------------
 
