@@ -63,11 +63,12 @@ training:
     physical_aux: 0.0
   # Matched corruption augmentation: train on the failure modes
   # identified by Gate 2-A (phase, jitter, coherent false)
+  # V2: gentler ratios to recover clean performance
   token_augmentation:
     enabled: true
-    batch_dropout_prob: 0.10
+    batch_dropout_prob: 0.05
     dropped_token_fraction: 0.3
-    batch_shuffle_prob: 0.05
-    phase_prob: 0.15            # random gain phase rotation per sample
-    jitter_std: 0.3             # location jitter std (bins)
-    coherent_false: 1           # coherent false tokens per sample
+    batch_shuffle_prob: 0.00
+    phase_prob: 0.05            # 5% of samples get phase rotation
+    jitter_std: 0.15            # gentle location jitter
+    coherent_false: 0           # disable for now (recovery test)
