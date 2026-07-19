@@ -73,4 +73,4 @@ training:
     batch_shuffle_prob: 0.00
     phase_prob: 0.03         # 3% of remaining 25% = ~0.75% of samples
     jitter_std: 0.10
-    coherent_false: 0
+    coherent_false: 1         # 1 coherent false per augmented sample
