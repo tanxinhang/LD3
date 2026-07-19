@@ -344,8 +344,8 @@ def _build_path_stats(
     n_valid_norm = valid_count / float(L)
 
     # Assemble [B, 4] → broadcast to [B, 4, N, M]
-    stats = torch.stack([mean_conf, std_conf, valid_ratio, n_valid_norm], dim=1)
-    stats = stats[:, :, None, None].expand(batch, 4, N, M)
+    stats_raw = torch.stack([mean_conf, std_conf, valid_ratio, n_valid_norm], dim=1)
+    stats = stats_raw[:, :, None, None].expand(batch, 4, N, M).clone()
 
     # Normalise to [-1, 1] range for stable CNN input
     # mean_conf already in [0,1], std_conf in [0, 0.5], ratios in [0,1]
