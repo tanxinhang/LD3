@@ -71,6 +71,6 @@ training:
     batch_dropout_prob: 0.05
     dropped_token_fraction: 0.3
     batch_shuffle_prob: 0.00
-    phase_prob: 0.03         # 3% of remaining 25% = ~0.75% of samples
+    phase_prob: 0.10         # 10% of remaining 25% = ~2.5% effective rate
     jitter_std: 0.10
     coherent_false: 1         # 1 coherent false per augmented sample
