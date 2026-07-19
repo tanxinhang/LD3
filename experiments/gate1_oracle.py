@@ -262,10 +262,12 @@ def train_model(
     aug_phase_prob: float = 0.0,
     aug_jitter_std: float = 0.0,
     aug_coherent_false: int = 0,
+    aug_clean_ratio: float = 0.0,
     aux_tf_weight: float = 0.0,
     aux_phys_weight: float = 0.0,
     gate_sup_weight: float = 0.0,
     gate_sup_temperature: float = 0.1,
+    gate_sup_margin: float = 0.0,
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
@@ -294,6 +296,14 @@ def train_model(
                 pt = batch["path_tokens"]
                 pv = batch["path_valid"]
                 if aug_enabled:
+                    # Clean sample ratio: skip aug for a fraction of samples
+                    if aug_clean_ratio > 0:
+                        B = pt.shape[0]
+                        clean_mask = torch.rand(B, device=device) < aug_clean_ratio
+                        # We handle this by temporarily saving and restoring clean tokens
+                        pt_clean = pt.clone()
+                        pv_clean = pv.clone()
+
                     # Token dropout: randomly invalidate a fraction of valid tokens
                     if aug_batch_dropout_prob > 0 and torch.rand(1).item() < aug_batch_dropout_prob:
                         valid_mask = pv.clone()
@@ -367,6 +377,11 @@ def train_model(
                                 pt[b, fi, 8] = pt[b, anchor_idx, 8] * 0.4
                                 pv[b, fi] = True
 
+                    # Restore clean samples (not selected for augmentation)
+                    if aug_clean_ratio > 0:
+                        pt = torch.where(clean_mask[:, None, None], pt_clean, pt)
+                        pv = torch.where(clean_mask[:, None], pv_clean, pv)
+
                 want_experts = (aux_tf_weight > 0 or aux_phys_weight > 0 or gate_sup_weight > 0)
                 if model_type == "physical_residual" and want_experts:
                     output, diagnostics = model(batch["tf_input"], pt, pv, return_components=True)
@@ -391,16 +406,25 @@ def train_model(
                 g_map = diagnostics["gate"]    # [B, 1, N, M]
 
                 # Per-pixel squared error of each expert
-                e_tf = (E_tf - target_ri).square().sum(dim=1, keepdim=True)    # [B, 1, N, M]
-                e_phys = (E_phys - target_ri).square().sum(dim=1, keepdim=True) # [B, 1, N, M]
+                eps = 1e-8
+                e_tf = (E_tf - target_ri).square().sum(dim=1, keepdim=True) + eps     # [B, 1, N, M]
+                e_phys = (E_phys - target_ri).square().sum(dim=1, keepdim=True) + eps  # [B, 1, N, M]
 
-                # Oracle target: g → 1 where physics is better, g → 0 where TF is better
-                g_star = torch.sigmoid((e_tf - e_phys) / gate_sup_temperature)
+                # Normalised expert advantage: scale-invariant, SNR-robust
+                advantage = (e_tf - e_phys) / (e_tf + e_phys)  # ∈ [-1, 1]
+                g_star = torch.sigmoid(advantage / gate_sup_temperature)
 
-                # BCE: clamp gate map for numerical safety (hard fallback → exact 0s)
+                # Margin mask: only supervise where experts clearly differ
+                margin = advantage.abs()
+                mask = (margin > gate_sup_margin).to(g_map.dtype)  # [B, 1, N, M]
+                mask_weight = mask.sum() / mask.numel() if mask.sum() > 0 else 1.0
+                mask = mask / mask_weight.clamp_min(0.01)  # normalise to maintain loss scale
+
+                # BCE with margin-masked supervision
                 g_safe = g_map.clamp(1e-7, 1.0 - 1e-7)
                 bce = -(g_star * torch.log(g_safe) + (1.0 - g_star) * torch.log(1.0 - g_safe))
-                L_gate = bce.mean()
+                L_gate = (bce * mask).sum() / mask.sum().clamp_min(1.0)
+
                 if torch.isfinite(L_gate):
                     loss = loss + gate_sup_weight * L_gate
             loss.backward()
@@ -594,11 +618,13 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     aug_phase_prob = float(aug_cfg.get("phase_prob", 0.0))
     aug_jitter_std = float(aug_cfg.get("jitter_std", 0.0))
     aug_coherent_false = int(aug_cfg.get("coherent_false", 0))
+    aug_clean_ratio = float(aug_cfg.get("clean_ratio", 0.0))
     loss_cfg = training.get("loss_weights", {})
     aux_tf_weight = float(loss_cfg.get("tf_aux", 0.0))
     aux_phys_weight = float(loss_cfg.get("physical_aux", 0.0))
     gate_sup_weight = float(training.get("gate_supervision", {}).get("weight", 0.0))
     gate_sup_temperature = float(training.get("gate_supervision", {}).get("temperature", 0.1))
+    gate_sup_margin = float(training.get("gate_supervision", {}).get("margin", 0.0))
 
     # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
     per_seed_nmse: dict[str, list[np.ndarray]] = {}
@@ -714,10 +740,12 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 aug_phase_prob=aug_phase_prob,
                 aug_jitter_std=aug_jitter_std,
                 aug_coherent_false=aug_coherent_false,
+                aug_clean_ratio=aug_clean_ratio,
                 aux_tf_weight=aux_tf_weight,
                 aux_phys_weight=aux_phys_weight,
                 gate_sup_weight=gate_sup_weight,
                 gate_sup_temperature=gate_sup_temperature,
+                gate_sup_margin=gate_sup_margin,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)
