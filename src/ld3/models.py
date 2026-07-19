@@ -305,6 +305,57 @@ def _build_quality_map(
     return torch.cat([discrepancy, confidence_map, uncertainty_map, valid_map], dim=1)  # [B, 4, N, M]
 
 
+def _build_path_stats(
+    path_tokens: torch.Tensor,  # [B, L, 9]
+    path_valid: torch.Tensor,   # [B, L]
+    N: int, M: int,
+) -> torch.Tensor:
+    """Build 4-channel spatial map of per-batch token-set statistics.
+
+    Channels:
+      0: mean_confidence — average token confidence across valid paths
+      1: std_confidence  — spread of token quality (high=some bad, some good)
+      2: valid_ratio     — fraction of slots occupied
+      3: n_valid_norm    — normalised count of valid paths / L_max
+
+    These capture SET-LEVEL information: "are all paths reliable, or is
+    there a mix of good and bad?" — information that per-path quality
+    cannot express alone.
+    """
+    batch, L, _ = path_tokens.shape
+    device = path_tokens.device
+    dtype = path_tokens.dtype
+
+    valid_f = path_valid.to(dtype)
+    valid_count = valid_f.sum(dim=1)  # [B]
+    safe_denom = valid_count.clamp_min(1.0)
+
+    # Mean confidence
+    conf = path_tokens[:, :, 3].clamp(0.0, 1.0)
+    mean_conf = (conf * valid_f).sum(dim=1) / safe_denom  # [B]
+
+    # Std confidence (measure of path quality spread)
+    # E[conf²] - E[conf]² over valid paths only
+    conf_sq_mean = (conf.square() * valid_f).sum(dim=1) / safe_denom
+    std_conf = (conf_sq_mean - mean_conf.square()).clamp_min(0.0).sqrt()
+
+    # Valid ratio and normalised count
+    valid_ratio = valid_count / float(L)
+    n_valid_norm = valid_count / float(L)
+
+    # Assemble [B, 4] → broadcast to [B, 4, N, M]
+    stats = torch.stack([mean_conf, std_conf, valid_ratio, n_valid_norm], dim=1)
+    stats = stats[:, :, None, None].expand(batch, 4, N, M)
+
+    # Normalise to [-1, 1] range for stable CNN input
+    # mean_conf already in [0,1], std_conf in [0, 0.5], ratios in [0,1]
+    stats[:, 0:1] = stats[:, 0:1] * 2.0 - 1.0        # [0,1] → [-1,1]
+    stats[:, 1:2] = stats[:, 1:2] * 4.0 - 1.0         # [0,0.5] → [-1,1]
+    stats[:, 2:4] = stats[:, 2:4] * 2.0 - 1.0         # [0,1] → [-1,1]
+
+    return stats  # [B, 4, N, M]
+
+
 class PhysicalResidualEstimator(nn.Module):
     """TF–DD gated residual estimator — Gate 1-D1 / Gate 2-C target architecture.
 
@@ -330,9 +381,11 @@ class PhysicalResidualEstimator(nn.Module):
         num_subcarriers: int = 64,
         num_symbols: int = 14,
         use_quality_gate: bool = False,
+        use_path_stats: bool = False,
     ) -> None:
         super().__init__()
         self.use_quality_gate = use_quality_gate
+        self.use_path_stats = use_path_stats
         self.tf_encoder = TFEncoder(hidden_dim)
         self.physics = PhysicalReconstructor(num_subcarriers, num_symbols)
 
@@ -344,8 +397,10 @@ class PhysicalResidualEstimator(nn.Module):
         )
 
         # Fusion gate: learns where to trust physics vs TF.
-        # Gate 2-C v2 adds 4 quality channels → H+4 → H+8.
-        gate_in_channels = hidden_dim + 4 + (4 if use_quality_gate else 0)
+        # Quality map: +4 channels. Path stats: +4 channels.
+        gate_in_channels = hidden_dim + 4
+        if use_quality_gate: gate_in_channels += 4
+        if use_path_stats:   gate_in_channels += 4
         self.gate = nn.Sequential(
             nn.Conv2d(gate_in_channels, hidden_dim // 2, 1),
             nn.GELU(),
@@ -384,11 +439,14 @@ class PhysicalResidualEstimator(nn.Module):
         H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
 
         # 3. Gated fusion
+        gate_parts = [tf_features, H_phys, H_tf]
         if self.use_quality_gate:
             quality_map = _build_quality_map(H_phys, H_tf, path_tokens, path_valid)
-            gate_input = torch.cat([tf_features, H_phys, H_tf, quality_map], dim=1)
-        else:
-            gate_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
+            gate_parts.append(quality_map)
+        if self.use_path_stats:
+            path_stats = _build_path_stats(path_tokens, path_valid, N, M)
+            gate_parts.append(path_stats)
+        gate_input = torch.cat(gate_parts, dim=1)
         g_raw = self.gate(gate_input)                     # [B, 1, N, M]
 
         # Hard null-fallback: when ALL tokens are invalid, force gate to zero.

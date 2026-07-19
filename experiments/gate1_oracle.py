@@ -610,6 +610,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
     hidden_dim = int(training["hidden_dim"])
     use_quality_gate = bool(training.get("use_quality_gate", False))
+    use_path_stats = bool(training.get("use_path_stats", False))
     aug_cfg = training.get("token_augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", False))
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
@@ -706,6 +707,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     num_subcarriers=ofdm.num_subcarriers,
                     num_symbols=ofdm.num_symbols,
                     use_quality_gate=use_quality_gate,
+                    use_path_stats=use_path_stats,
                 ),
                 "physical_residual", "physical_residual",
             ),
