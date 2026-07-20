@@ -306,54 +306,106 @@ def _build_quality_map(
 
 
 def _build_path_stats(
-    path_tokens: torch.Tensor,  # [B, L, 9]
+    path_tokens: torch.Tensor,  # [B, L, 9]: tau,nu,power,conf,st,sv,rel,rea,ima
     path_valid: torch.Tensor,   # [B, L]
     N: int, M: int,
 ) -> torch.Tensor:
-    """Build 4-channel spatial map of per-batch token-set statistics.
+    """Build 7-channel spatial map of physics-aware path-set statistics.
 
-    Channels:
-      0: mean_confidence — average token confidence across valid paths
-      1: std_confidence  — spread of token quality (high=some bad, some good)
-      2: valid_ratio     — fraction of slots occupied
-      3: n_valid_norm    — normalised count of valid paths / L_max
+    Channels (all normalised to [-1, 1]):
+      0: power_entropy    — H_p = -Σ w_l·log(w_l)/log(K)  [0,1]
+      1: top1_ratio       — max_l w_l  [0,1]
+      2: dd_spread_tau    — power-weighted τ std, normalised by max_delay
+      3: dd_spread_nu     — power-weighted ν std, normalised by max_doppler
+      4: min_pair_dist    — minimum DD distance between valid path pairs
+      5: std_confidence   — spread of per-path quality
+      6: std_relevance    — spread of per-path relevance (LOO contribution)
 
-    These capture SET-LEVEL information: "are all paths reliable, or is
-    there a mix of good and bad?" — information that per-path quality
-    cannot express alone.
+    These capture RELATIONAL information: path crowding, power concentration,
+    DD dispersion, and quality heterogeneity — none of which are available
+    from per-path scalar features or the existing quality map.
     """
-    batch, L, _ = path_tokens.shape
+    batch, L, D = path_tokens.shape
     device = path_tokens.device
     dtype = path_tokens.dtype
+    eps = 1e-8
 
     valid_f = path_valid.to(dtype)
     valid_count = valid_f.sum(dim=1)  # [B]
     safe_denom = valid_count.clamp_min(1.0)
 
-    # Mean confidence
+    tau = path_tokens[:, :, 0]       # [B, L]
+    nu = path_tokens[:, :, 1]        # [B, L]
+    power = path_tokens[:, :, 2].clamp_min(eps)  # [B, L]
     conf = path_tokens[:, :, 3].clamp(0.0, 1.0)
-    mean_conf = (conf * valid_f).sum(dim=1) / safe_denom  # [B]
+    rel = path_tokens[:, :, 6].clamp(0.0, 1.0)
 
-    # Std confidence (measure of path quality spread)
-    # E[conf²] - E[conf]² over valid paths only
+    # Normalised power weights w_l = p_l / Σ p_j over valid paths
+    masked_power = power * valid_f
+    power_sum = masked_power.sum(dim=1).clamp_min(eps)  # [B]
+    w = masked_power / power_sum[:, None]                # [B, L], Σw=1 over valid
+
+    # --- Channel 0: power entropy H_p ∈ [0,1] ---
+    # H_p → 0: one dominant path. H_p → 1: all paths equal power.
+    w_log = w * torch.log(w + eps)
+    H_p_raw = -(w_log * valid_f).sum(dim=1)  # [B]
+    H_p_max = torch.log(valid_count.clamp_min(1.0))  # [B], log(K_eff)
+    H_p = (H_p_raw / H_p_max.clamp_min(eps)).clamp(0.0, 1.0)  # [B]
+
+    # --- Channel 1: top-1 power ratio ---
+    r_top1 = w.max(dim=1).values  # [B]
+
+    # --- Channels 2–3: power-weighted DD spread ---
+    tau_bar = (tau * w).sum(dim=1)  # [B]
+    nu_bar = (nu * w).sum(dim=1)    # [B]
+    tau_var = ((tau - tau_bar[:, None]).square() * w).sum(dim=1)  # [B]
+    nu_var = ((nu - nu_bar[:, None]).square() * w).sum(dim=1)     # [B]
+    # Normalise: max_delay ≈ 12 bins, max_doppler ≈ 3 bins
+    sigma_tau_w = tau_var.clamp_min(0.0).sqrt() / 6.0   # [B], ~[0,2]→clip
+    sigma_nu_w = nu_var.clamp_min(0.0).sqrt() / 3.0     # [B], ~[0,2]→clip
+
+    # --- Channel 4: minimum DD distance between valid path pairs ---
+    d_min = torch.ones(batch, device=device, dtype=dtype)  # default large
+    for b in range(batch):
+        v_idx = torch.nonzero(path_valid[b], as_tuple=False).squeeze(-1)
+        if v_idx.shape[0] >= 2:
+            tau_b = tau[b, v_idx]
+            nu_b = nu[b, v_idx]
+            d_tau = (tau_b[:, None] - tau_b[None, :]).abs()
+            d_nu = (nu_b[:, None] - nu_b[None, :]).abs()
+            # Normalised DD distance
+            d2 = (d_tau / 6.0).square() + (d_nu / 3.0).square()
+            d2 = d2 + torch.eye(v_idx.shape[0], device=device) * 1e9  # ignore self
+            d_min[b] = d2.min().sqrt().clamp(0.0, 2.0)
+
+    # --- Channels 5–6: quality heterogeneity ---
+    mean_conf = (conf * valid_f).sum(dim=1) / safe_denom
     conf_sq_mean = (conf.square() * valid_f).sum(dim=1) / safe_denom
     std_conf = (conf_sq_mean - mean_conf.square()).clamp_min(0.0).sqrt()
 
-    # Valid ratio and normalised count
-    valid_ratio = valid_count / float(L)
-    n_valid_norm = valid_count / float(L)
+    mean_rel = (rel * valid_f).sum(dim=1) / safe_denom
+    rel_sq_mean = (rel.square() * valid_f).sum(dim=1) / safe_denom
+    std_rel = (rel_sq_mean - mean_rel.square()).clamp_min(0.0).sqrt()
 
-    # Assemble [B, 4] → broadcast to [B, 4, N, M]
-    stats_raw = torch.stack([mean_conf, std_conf, valid_ratio, n_valid_norm], dim=1)
-    stats = stats_raw[:, :, None, None].expand(batch, 4, N, M).clone()
+    # --- Assemble [B, 7] → broadcast to [B, 7, N, M] ---
+    stats_raw = torch.stack([
+        H_p, r_top1,
+        sigma_tau_w.clamp(0.0, 2.0), sigma_nu_w.clamp(0.0, 2.0),
+        d_min,
+        std_conf, std_rel,
+    ], dim=1)  # [B, 7]
+    stats = stats_raw[:, :, None, None].expand(batch, 7, N, M).clone()
 
-    # Normalise to [-1, 1] range for stable CNN input
-    # mean_conf already in [0,1], std_conf in [0, 0.5], ratios in [0,1]
-    stats[:, 0:1] = stats[:, 0:1] * 2.0 - 1.0        # [0,1] → [-1,1]
-    stats[:, 1:2] = stats[:, 1:2] * 4.0 - 1.0         # [0,0.5] → [-1,1]
-    stats[:, 2:4] = stats[:, 2:4] * 2.0 - 1.0         # [0,1] → [-1,1]
+    # Normalise to [-1, 1]
+    # Channels 0-1,4: already in [0,1]
+    stats[:, 0:2] = stats[:, 0:2] * 2.0 - 1.0
+    stats[:, 4:5] = stats[:, 4:5] * 2.0 - 1.0
+    # Channels 2-3: sigma in [0, 2]
+    stats[:, 2:4] = stats[:, 2:4] - 1.0
+    # Channels 5-6: std in [0, 0.5]
+    stats[:, 5:7] = stats[:, 5:7] * 4.0 - 1.0
 
-    return stats  # [B, 4, N, M]
+    return stats  # [B, 7, N, M]
 
 
 class PhysicalResidualEstimator(nn.Module):
@@ -397,10 +449,10 @@ class PhysicalResidualEstimator(nn.Module):
         )
 
         # Fusion gate: learns where to trust physics vs TF.
-        # Quality map: +4 channels. Path stats: +4 channels.
+        # Quality map: +4 channels. Path stats v2: +7 channels.
         gate_in_channels = hidden_dim + 4
         if use_quality_gate: gate_in_channels += 4
-        if use_path_stats:   gate_in_channels += 4
+        if use_path_stats:   gate_in_channels += 7
         self.gate = nn.Sequential(
             nn.Conv2d(gate_in_channels, hidden_dim // 2, 1),
             nn.GELU(),
