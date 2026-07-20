@@ -570,6 +570,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     token_ref = str(data_cfg.get("token_refine", ""))
     token_vp_r = int(data_cfg.get("token_vp_rounds", 3))
     token_vp_p = int(data_cfg.get("token_vp_probes", 8))
+    precomp_dir = str(data_cfg.get("precomputed_dir", ""))
     test_cfg_fixed = DatasetConfig(
         size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
@@ -617,7 +618,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     use_quality_gate = bool(training.get("use_quality_gate", False))
     use_path_stats = bool(training.get("use_path_stats", False))
     gate_kernel_size = int(training.get("gate_kernel_size", 1))
-    precomp_dir = str(data_cfg.get("precomputed_dir", ""))
     aug_cfg = training.get("token_augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", False))
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
