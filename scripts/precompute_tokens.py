@@ -70,7 +70,7 @@ def generate_sample(
     vp_search: str,
 ) -> dict[str, Any]:
     """Generate one sample with full DD pipeline + optional VP refinement."""
-    rng = np.random.default_rng([seed, sample_idx])
+    rng = np.random.default_rng([int(seed), int(sample_idx)])
     paths = generate_path_set(ofdm, channel, rng)
     truth = synthesize_tf_channel(ofdm, paths)
     snr_db = float(rng.uniform(snr_min, snr_max))
@@ -194,11 +194,11 @@ def main():
         print(f"Generating {split} ({size} samples, {n_workers or 'auto'} workers)...")
 
         common_args = (
-            ofdm, channel, sc["seed"],
+            ofdm, channel, int(sc["seed"]),
             float(data_cfg["snr_min_db"]), float(data_cfg["snr_max_db"]),
             float(data_cfg["pilot_density"]), str(data_cfg["pilot_pattern"]),
-            int(data_cfg["max_paths"]), token_ver, token_src, token_ref,
-            vp_r, vp_p, vp_search,
+            int(data_cfg["max_paths"]), int(token_ver), str(token_src), str(token_ref),
+            int(vp_r), int(vp_p), str(vp_search),
         )
 
         samples: list[dict] = [{}] * size  # pre-allocate for ordered results
