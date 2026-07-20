@@ -47,12 +47,13 @@ from ld3.oracle import (
 from ld3.pilots import generate_noise_grid, make_pilot_mask, observe_pilots
 
 
-def _generate_one(args: tuple, idx: int) -> dict[str, Any]:
+def _generate_one(kwargs: dict, idx: int) -> dict[str, Any]:
     """Thin wrapper for ProcessPoolExecutor (must be top-level, pickleable)."""
-    return generate_sample(*args, idx)
+    return generate_sample(sample_idx=idx, **kwargs)
 
 
 def generate_sample(
+    *,
     ofdm: OFDMConfig,
     channel: ChannelConfig,
     seed: int,
@@ -73,11 +74,7 @@ def generate_sample(
     rng = np.random.default_rng([int(seed), int(sample_idx)])
     paths = generate_path_set(ofdm, channel, rng)
     truth = synthesize_tf_channel(ofdm, paths)
-    if snr_min >= snr_max:
-        print(f"WARNING: snr_min={snr_min} >= snr_max={snr_max}, using fixed SNR={snr_min}")
-        snr_db = float(snr_min)
-    else:
-        snr_db = float(rng.uniform(snr_min, snr_max))
+    snr_db = float(rng.uniform(snr_min, snr_max))
     mask = make_pilot_mask(
         ofdm.num_subcarriers, ofdm.num_symbols,
         pilot_density, rng, pilot_pattern,
@@ -197,27 +194,33 @@ def main():
         size = sc["size"]
         print(f"Generating {split} ({size} samples, {n_workers or 'auto'} workers)...")
 
-        common_args = (
-            ofdm, channel, int(sc["seed"]),
-            float(data_cfg["snr_min_db"]), float(data_cfg["snr_max_db"]),
-            float(data_cfg["pilot_density"]), str(data_cfg["pilot_pattern"]),
-            int(data_cfg["max_paths"]), int(token_ver), str(token_src), str(token_ref),
-            int(vp_r), int(vp_p), str(vp_search),
-        )
+        common_kwargs = {
+            "ofdm": ofdm, "channel": channel, "seed": int(sc["seed"]),
+            "snr_min": float(data_cfg["snr_min_db"]),
+            "snr_max": float(data_cfg["snr_max_db"]),
+            "pilot_density": float(data_cfg["pilot_density"]),
+            "pilot_pattern": str(data_cfg["pilot_pattern"]),
+            "max_paths": int(data_cfg["max_paths"]),
+            "token_version": int(token_ver),
+            "token_source": str(token_src),
+            "token_refine": str(token_ref),
+            "vp_rounds": int(vp_r),
+            "vp_probes": int(vp_p),
+            "vp_search": str(vp_search),
+        }
 
-        samples: list[dict] = [{}] * size  # pre-allocate for ordered results
+        samples: list[dict] = [{}] * size
 
         if n_workers == 1 or (n_workers is None and size < 100):
-            # Sequential path (no IPC overhead)
             for idx in range(size):
-                samples[idx] = generate_sample(*common_args, idx)
+                samples[idx] = generate_sample(sample_idx=idx, **common_kwargs)
                 if (idx + 1) % 500 == 0:
                     print(f"  {idx + 1}/{size}")
         else:
             # Parallel path: one task per sample
             with ProcessPoolExecutor(max_workers=n_workers) as executor:
                 futures = {
-                    executor.submit(_generate_one, common_args, idx): idx
+                    executor.submit(_generate_one, common_kwargs, idx): idx
                     for idx in range(size)
                 }
                 done = 0
