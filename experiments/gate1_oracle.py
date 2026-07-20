@@ -583,6 +583,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_refine=token_ref,
         token_vp_rounds=token_vp_r,
         token_vp_probes=token_vp_p,
+        precomputed_dir=precomp_dir,
     )
     # Fixed validation bank for best-checkpoint selection
     val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))
@@ -616,6 +617,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     use_quality_gate = bool(training.get("use_quality_gate", False))
     use_path_stats = bool(training.get("use_path_stats", False))
     gate_kernel_size = int(training.get("gate_kernel_size", 1))
+    precomp_dir = str(data_cfg.get("precomputed_dir", ""))
     aug_cfg = training.get("token_augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", False))
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
