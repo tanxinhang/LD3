@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,11 @@ from ld3.oracle import (
     oracle_path_tokens_v2,
 )
 from ld3.pilots import generate_noise_grid, make_pilot_mask, observe_pilots
+
+
+def _generate_one(args: tuple, idx: int) -> dict[str, Any]:
+    """Thin wrapper for ProcessPoolExecutor (must be top-level, pickleable)."""
+    return generate_sample(*args, idx)
 
 
 def generate_sample(
@@ -150,6 +156,8 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--splits", type=str, default="train,val,test")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel workers (0=auto)")
     args = parser.parse_args()
 
     with open(args.config, encoding="utf-8") as f:
@@ -175,46 +183,66 @@ def main():
         "test": {"size": int(data_cfg["test_size"]), "seed": base_seed + 10000},
     }
 
+    # Pack common args for parallel workers
+    n_workers = args.workers if args.workers > 0 else None  # None = auto
+
     for split in splits:
         if split not in split_configs:
             continue
         sc = split_configs[split]
-        print(f"Generating {split} ({sc['size']} samples)...")
-        tokens_list, valid_list, tf_list, tgt_list, snr_list = [], [], [], [], []
+        size = sc["size"]
+        print(f"Generating {split} ({size} samples, {n_workers or 'auto'} workers)...")
 
-        for idx in range(sc["size"]):
-            sample = generate_sample(
-                ofdm, channel, sc["seed"], idx,
-                float(data_cfg["snr_min_db"]), float(data_cfg["snr_max_db"]),
-                float(data_cfg["pilot_density"]), str(data_cfg["pilot_pattern"]),
-                int(data_cfg["max_paths"]), token_ver, token_src, token_ref,
-                vp_r, vp_p, vp_search,
-            )
-            tokens_list.append(sample["path_tokens"])
-            valid_list.append(sample["path_valid"])
-            tf_list.append(sample["tf_input"])
-            tgt_list.append(sample["target"])
-            snr_list.append(sample["snr_db"])
-            if (idx + 1) % 500 == 0:
-                print(f"  {idx + 1}/{sc['size']}")
+        common_args = (
+            ofdm, channel, sc["seed"],
+            float(data_cfg["snr_min_db"]), float(data_cfg["snr_max_db"]),
+            float(data_cfg["pilot_density"]), str(data_cfg["pilot_pattern"]),
+            int(data_cfg["max_paths"]), token_ver, token_src, token_ref,
+            vp_r, vp_p, vp_search,
+        )
 
+        samples: list[dict] = [{}] * size  # pre-allocate for ordered results
+
+        if n_workers == 1 or (n_workers is None and size < 100):
+            # Sequential path (no IPC overhead)
+            for idx in range(size):
+                samples[idx] = generate_sample(*common_args, idx)
+                if (idx + 1) % 500 == 0:
+                    print(f"  {idx + 1}/{size}")
+        else:
+            # Parallel path: one task per sample
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {
+                    executor.submit(_generate_one, common_args, idx): idx
+                    for idx in range(size)
+                }
+                done = 0
+                for fut in as_completed(futures):
+                    idx = futures[fut]
+                    samples[idx] = fut.result()
+                    done += 1
+                    if done % 500 == 0:
+                        print(f"  {done}/{size}")
+
+        # Pack into arrays
         out_path = args.output_dir / f"{split}.npz"
         np.savez_compressed(
             out_path,
-            tokens=np.array(tokens_list, dtype=np.float32),
-            valid=np.array(valid_list, dtype=bool),
-            tf_input=np.array(tf_list, dtype=np.float32),
-            target=np.array(tgt_list, dtype=np.float32),
-            snr_db=np.array(snr_list, dtype=np.float32),
+            tokens=np.array([s["path_tokens"] for s in samples], dtype=np.float32),
+            valid=np.array([s["path_valid"] for s in samples], dtype=bool),
+            tf_input=np.array([s["tf_input"] for s in samples], dtype=np.float32),
+            target=np.array([s["target"] for s in samples], dtype=np.float32),
+            snr_db=np.array([s["snr_db"] for s in samples], dtype=np.float32),
         )
         print(f"  Saved -> {out_path} ({out_path.stat().st_size / 1e6:.1f} MB)")
 
     # Save metadata
+    sample_sizes = {s: split_configs[s]["size"] for s in splits if s in split_configs}
     meta = {
         "config": config,
-        "token_dim": tokens_list[0].shape[-1],
+        "token_dim": token_ver,  # version, actual dim depends on version
         "max_paths": int(data_cfg["max_paths"]),
-        "splits": {s: split_configs[s]["size"] for s in splits if s in split_configs},
+        "splits": sample_sizes,
     }
     with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
