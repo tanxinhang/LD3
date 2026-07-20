@@ -73,7 +73,11 @@ def generate_sample(
     rng = np.random.default_rng([int(seed), int(sample_idx)])
     paths = generate_path_set(ofdm, channel, rng)
     truth = synthesize_tf_channel(ofdm, paths)
-    snr_db = float(rng.uniform(snr_min, snr_max))
+    if snr_min >= snr_max:
+        print(f"WARNING: snr_min={snr_min} >= snr_max={snr_max}, using fixed SNR={snr_min}")
+        snr_db = float(snr_min)
+    else:
+        snr_db = float(rng.uniform(snr_min, snr_max))
     mask = make_pilot_mask(
         ofdm.num_subcarriers, ofdm.num_symbols,
         pilot_density, rng, pilot_pattern,
