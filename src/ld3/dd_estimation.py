@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
@@ -342,16 +343,17 @@ def refine_paths_variable_projection(
     step_delay: float = 0.1,
     step_doppler: float = 0.1,
     ridge_relative: float = 1e-6,
+    search_method: str = "random",
 ) -> tuple[EstimatedPaths, dict]:
-    """Refine DD path estimates via bounded random-probe variable projection.
+    """Refine DD path estimates via variable projection coordinate descent.
 
-    For each path, tries small random (τ, ν) perturbations, re-estimates
-    gains via LS, and accepts if pilot residual decreases.  Runs multiple
-    rounds of coordinate descent over all paths.
+    search_method:
+      "random" — bounded random probes, monotonic acceptance gate (legacy)
+      "golden" — deterministic golden-section line search per axis
 
-    This is simpler and more robust than gradient descent — no gradients of
-    the dictionary w.r.t. τ/ν are needed, and monotonicity is guaranteed by
-    the acceptance gate.
+    For each path, tries perturbations, re-estimates gains via LS, and
+    accepts if pilot residual decreases. Runs multiple rounds of coordinate
+    descent over all paths.
 
     Returns (refined_paths, diagnostics).
     """
@@ -448,25 +450,103 @@ def refine_paths_variable_projection(
             best_resid = resid_old
             accepted_this = False
 
-            # Try N probes in random directions
-            for _ in range(n_probes):
-                d_probe = d_bins[l] + step_d * (rng.uniform(-1, 1))
-                f_probe = f_bins[l] + step_f * (rng.uniform(-1, 1))
-                # Clamp to physical range
-                d_probe = max(0.0, d_probe)
-                f_probe = max(-3.0, min(3.0, f_probe))
+            if search_method == "golden":
+                # --- Golden-section line search per axis ---
+                phi = (math.sqrt(5.0) - 1.0) / 2.0  # 0.618...
 
-                d_trial = d_bins.copy()
-                f_trial = f_bins.copy()
-                d_trial[l] = d_probe
-                f_trial[l] = f_probe
+                def _golden_search_1d(
+                    x0: float, direction: str, step: float,
+                    lo_bound: float, hi_bound: float,
+                    d_bins_base: np.ndarray, f_bins_base: np.ndarray,
+                ) -> tuple[float, float]:
+                    """Golden-section search along delay or doppler axis."""
+                    a = max(lo_bound, x0 - step)
+                    b = min(hi_bound, x0 + step)
+                    if b - a < 0.001:  # already converged
+                        return x0, best_resid
 
-                resid_new, _, _ = _compute_residual(d_trial, f_trial)
-                if resid_new < best_resid:
-                    best_resid = resid_new
-                    best_d = d_probe
-                    best_f = f_probe
+                    c = b - phi * (b - a)
+                    d = a + phi * (b - a)
+                    n_iter = max(8, int(math.log(0.001 / (b - a + 1e-8)) / math.log(phi)) + 3)
+
+                    # Evaluate at c and d
+                    for _ in range(n_iter // 2):
+                        # Eval at c
+                        d_trial = d_bins_base.copy()
+                        f_trial = f_bins_base.copy()
+                        if direction == "delay":
+                            d_trial[l] = c
+                        else:
+                            f_trial[l] = c
+                        rc, _, _ = _compute_residual(d_trial, f_trial)
+
+                        # Eval at d
+                        d_trial = d_bins_base.copy()
+                        f_trial = f_bins_base.copy()
+                        if direction == "delay":
+                            d_trial[l] = d
+                        else:
+                            f_trial[l] = d
+                        rd, _, _ = _compute_residual(d_trial, f_trial)
+
+                        if rc < rd:
+                            b = d
+                            d = c
+                            c = b - phi * (b - a)
+                        else:
+                            a = c
+                            c = d
+                            d = a + phi * (b - a)
+
+                        if b - a < 0.001:
+                            break
+
+                    x_best = (a + b) / 2.0
+                    # Final eval at best
+                    d_trial = d_bins_base.copy()
+                    f_trial = f_bins_base.copy()
+                    if direction == "delay":
+                        d_trial[l] = x_best
+                    else:
+                        f_trial[l] = x_best
+                    r_best, _, _ = _compute_residual(d_trial, f_trial)
+                    return x_best, r_best
+
+                # Golden-section on delay axis
+                new_d, resid_d = _golden_search_1d(
+                    d_bins[l], "delay", step_d, 0.0, 12.0, d_bins, f_bins,
+                )
+                if resid_d < best_resid:
+                    best_d, best_resid = new_d, resid_d
                     accepted_this = True
+
+                # Golden-section on doppler axis
+                new_f, resid_f = _golden_search_1d(
+                    f_bins[l], "doppler", step_f, -3.0, 3.0, d_bins, f_bins,
+                )
+                if resid_f < best_resid:
+                    best_f, best_resid = new_f, resid_f
+                    accepted_this = True
+
+            else:
+                # --- Legacy random probes ---
+                for _ in range(n_probes):
+                    d_probe = d_bins[l] + step_d * (rng.uniform(-1, 1))
+                    f_probe = f_bins[l] + step_f * (rng.uniform(-1, 1))
+                    d_probe = max(0.0, d_probe)
+                    f_probe = max(-3.0, min(3.0, f_probe))
+
+                    d_trial = d_bins.copy()
+                    f_trial = f_bins.copy()
+                    d_trial[l] = d_probe
+                    f_trial[l] = f_probe
+
+                    resid_new, _, _ = _compute_residual(d_trial, f_trial)
+                    if resid_new < best_resid:
+                        best_resid = resid_new
+                        best_d = d_probe
+                        best_f = f_probe
+                        accepted_this = True
 
             if accepted_this:
                 d_bins[l] = best_d

@@ -39,6 +39,8 @@ class DatasetConfig:
     token_refine: str = ""  # "" | "vp" — apply continuous refinement to estimated tokens
     token_vp_rounds: int = 3  # VP coordinate descent rounds
     token_vp_probes: int = 8  # VP random probes per path per round
+    token_vp_search: str = "random"  # "random" | "golden" — search method
+    precomputed_dir: str = ""  # path to precomputed .npz files (offline VP)
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -54,6 +56,36 @@ class SyntheticOFDMISACDataset(Dataset):
         self.channel = channel
         self.cfg = cfg
         self._cache: dict[int, dict[str, torch.Tensor]] = {}
+        self._precomputed: dict[str, np.ndarray] | None = None
+
+        # Load precomputed tokens from disk (mmap for large files)
+        if cfg.precomputed_dir:
+            self._load_precomputed(cfg)
+
+    def _load_precomputed(self, cfg: DatasetConfig) -> None:
+        """Memory-map precomputed .npz to avoid CPU VP during training."""
+        # Determine which split this dataset represents based on seed offset
+        base_seed = cfg.seed
+        # Heuristic: seed = base → train, base+10000 → test, base+20000 → val
+        for split_name, seed_offset in [("train", 0), ("test", 10000), ("val", 20000)]:
+            if cfg.seed == base_seed + seed_offset:
+                split = split_name
+                break
+        else:
+            split = "train"  # fallback
+        npz_path = Path(cfg.precomputed_dir) / f"{split}.npz"
+        if not npz_path.exists():
+            return  # fall back to online generation
+        data = np.load(npz_path, mmap_mode='r')
+        self._precomputed = {
+            "tokens": data["tokens"],
+            "valid": data["valid"],
+            "tf_input": data["tf_input"],
+            "target": data["target"],
+            "snr_db": data["snr_db"],
+        }
+        if self._precomputed["tokens"].shape[0] < cfg.size:
+            self._precomputed = None  # not enough samples
 
     def __len__(self) -> int:
         return self.cfg.size
@@ -61,6 +93,17 @@ class SyntheticOFDMISACDataset(Dataset):
     def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
         if self.cfg.cache_in_memory and index in self._cache:
             return self._cache[index]
+
+        # Fast path: load precomputed tokens (VP already done offline)
+        if self._precomputed is not None:
+            sample = {
+                "tf_input": torch.tensor(self._precomputed["tf_input"][index], dtype=torch.float32),
+                "target": torch.tensor(self._precomputed["target"][index], dtype=torch.float32),
+                "path_tokens": torch.tensor(self._precomputed["tokens"][index], dtype=torch.float32),
+                "path_valid": torch.tensor(self._precomputed["valid"][index], dtype=torch.bool),
+                "snr_db": torch.tensor(self._precomputed["snr_db"][index].item(), dtype=torch.float32),
+            }
+            return sample
 
         rng = np.random.default_rng([self.cfg.seed, index])
         paths = generate_path_set(self.ofdm, self.channel, rng)
@@ -106,6 +149,7 @@ class SyntheticOFDMISACDataset(Dataset):
                         num_symbols=self.ofdm.num_symbols,
                         n_rounds=self.cfg.token_vp_rounds,
                         n_probes=self.cfg.token_vp_probes,
+                        search_method=self.cfg.token_vp_search,
                     )
                 # LS gain estimation at (possibly refined) DD positions
                 from .oracle import _ridge_ls, _col_norms, _build_raw_dict
