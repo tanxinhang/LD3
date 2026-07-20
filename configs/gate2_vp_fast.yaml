@@ -1,0 +1,75 @@
+# Gate 2 VP Fast: speed-optimized, preserving Tier 1 gains
+#
+# Speed optimizations vs gate2_vp_optimize:
+#   - VP rounds 5→3, probes 12→8
+#   - hidden_dim 96→72
+#   - epochs 400→300
+#   - train_size 4096→3072
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_vp_fast.yaml \
+#     --output-dir results/gate2_vp_fast \
+#     --device cuda
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 3072
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 5.0
+  snr_max_db: 20.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2
+  token_source: estimated
+  token_refine: vp
+  token_vp_rounds: 3
+  token_vp_probes: 8
+
+training:
+  epochs: 300
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 72
+  num_threads: 4
+  num_seeds: 3
+  use_quality_gate: true
+  use_path_stats: true
+  gate_kernel_size: 3
+  gate_supervision:
+    weight: 0.05
+    temperature: 0.1
+    margin: 0.05
+  loss_weights:
+    final: 1.0
+    tf_aux: 0.2
+    physical_aux: 0.0
+  token_augmentation:
+    enabled: true
+    clean_ratio: 0.75
+    batch_dropout_prob: 0.05
+    dropped_token_fraction: 0.3
+    batch_shuffle_prob: 0.00
+    phase_prob: 0.10
+    jitter_std: 0.10
+    coherent_false: 1
