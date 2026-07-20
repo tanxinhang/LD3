@@ -434,6 +434,7 @@ class PhysicalResidualEstimator(nn.Module):
         num_symbols: int = 14,
         use_quality_gate: bool = False,
         use_path_stats: bool = False,
+        gate_kernel_size: int = 1,
     ) -> None:
         super().__init__()
         self.use_quality_gate = use_quality_gate
@@ -453,10 +454,11 @@ class PhysicalResidualEstimator(nn.Module):
         gate_in_channels = hidden_dim + 4
         if use_quality_gate: gate_in_channels += 4
         if use_path_stats:   gate_in_channels += 7
+        ks = gate_kernel_size
         self.gate = nn.Sequential(
-            nn.Conv2d(gate_in_channels, hidden_dim // 2, 1),
+            nn.Conv2d(gate_in_channels, hidden_dim // 2, ks, padding=ks // 2),
             nn.GELU(),
-            nn.Conv2d(hidden_dim // 2, 1, 1),
+            nn.Conv2d(hidden_dim // 2, 1, ks, padding=ks // 2),
             nn.Sigmoid(),
         )
 

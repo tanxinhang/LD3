@@ -281,6 +281,9 @@ def train_model(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=epochs, eta_min=learning_rate * 0.01
+    )
     history: list[dict[str, float]] = []
     best_val_nmse = float("inf")
     best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
@@ -456,6 +459,7 @@ def train_model(
                 row["best"] = True
 
         history.append(row)
+        scheduler.step()
         parts = [f"epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}"]
         if val_loader is not None:
             parts.append(f"val_nmse={row.get('val_nmse', float('nan')):.6f}")
@@ -611,6 +615,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     hidden_dim = int(training["hidden_dim"])
     use_quality_gate = bool(training.get("use_quality_gate", False))
     use_path_stats = bool(training.get("use_path_stats", False))
+    gate_kernel_size = int(training.get("gate_kernel_size", 1))
     aug_cfg = training.get("token_augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", False))
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
@@ -708,6 +713,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     num_symbols=ofdm.num_symbols,
                     use_quality_gate=use_quality_gate,
                     use_path_stats=use_path_stats,
+                    gate_kernel_size=gate_kernel_size,
                 ),
                 "physical_residual", "physical_residual",
             ),

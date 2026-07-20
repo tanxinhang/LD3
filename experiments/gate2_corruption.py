@@ -413,6 +413,7 @@ def main() -> None:
     # Detect quality-gate from training config
     use_quality_gate = bool(training_cfg.get("use_quality_gate", False))
     use_path_stats = bool(training_cfg.get("use_path_stats", False))
+    gate_kernel_size = int(training_cfg.get("gate_kernel_size", 1))
     # Try estimated_residual first, then physics_residual
     model = PhysicalResidualEstimator(
         hidden_dim=hidden_dim,
@@ -420,6 +421,7 @@ def main() -> None:
         num_symbols=ofdm.num_symbols,
         use_quality_gate=use_quality_gate,
         use_path_stats=use_path_stats,
+        gate_kernel_size=gate_kernel_size,
     ).to(device)
 
     model_pt = args.model_dir / "estimated_residual_seed0.pt"
