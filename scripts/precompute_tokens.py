@@ -152,7 +152,7 @@ def main():
     parser.add_argument("--splits", type=str, default="train,val,test")
     args = parser.parse_args()
 
-    with open(args.config) as f:
+    with open(args.config, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     ofdm = OFDMConfig(**config["ofdm"])
@@ -216,7 +216,7 @@ def main():
         "max_paths": int(data_cfg["max_paths"]),
         "splits": {s: split_configs[s]["size"] for s in splits if s in split_configs},
     }
-    with open(args.output_dir / "metadata.json", "w") as f:
+    with open(args.output_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     print(f"\nMetadata -> {args.output_dir / 'metadata.json'}")
 
