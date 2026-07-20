@@ -6,3 +6,5 @@ results/**/*.pt
 !results/.gitkeep
 
 *.egg-info/
+*.npz
+data/

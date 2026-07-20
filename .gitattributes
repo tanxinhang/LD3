@@ -5,3 +5,4 @@
 *.md text diff=markdown
 *.png binary
 *.pt binary
+*.npz binary
