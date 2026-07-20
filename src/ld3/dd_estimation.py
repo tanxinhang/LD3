@@ -376,15 +376,16 @@ def refine_paths_variable_projection(
     # Pilot residual for current positions
     def _compute_residual(d, f):
         K = len(d)
-        # Build dictionary columns (vectorized per column)
-        A = np.zeros((n_idx.size, K), dtype=np.complex128)
-        for l in range(K):
-            A[:, l] = np.exp(-2j * np.pi * n_idx * d[l] / N) * np.exp(2j * np.pi * m_idx * f[l] / M)
-            col_norm = np.sqrt(np.sum(np.abs(A[:, l]) ** 2))
-            if col_norm > np.finfo(float).eps:
-                A[:, l] /= col_norm
+        # Build dictionary via broadcasting (P × K in one shot)
+        d_arr = np.asarray(d, dtype=np.float64)
+        f_arr = np.asarray(f, dtype=np.float64)
+        dph = np.exp(-2j * np.pi * n_idx[:, None] * d_arr[None, :] / N)  # [P, K]
+        fph = np.exp(2j * np.pi * m_idx[:, None] * d_arr[None, :] / M)   # [P, K]
+        A = dph * fph                                                       # [P, K]
+        col_norm = np.sqrt(np.sum(np.abs(A) ** 2, axis=0))
+        A = A / np.maximum(col_norm, np.finfo(float).eps)
 
-        # Fast path: numpy matmul for Gram and rhs (10-50x faster than manual loops)
+        # Fast path: numpy matmul for Gram and rhs (BLAS-accelerated)
         gram = A.conj().T @ A  # [K, K]
         rhs = A.conj().T @ y   # [K]
 
@@ -395,19 +396,15 @@ def refine_paths_variable_projection(
         # Solve real system (manual Cholesky — MKL-safe)
         dim = 2 * K
         G_real = np.zeros((dim, dim))
-        rhs_real = np.zeros(dim)
-        for i in range(K):
-            rhs_real[i] = float(rhs[i].real)
-            rhs_real[i + K] = float(rhs[i].imag)
-            for j in range(K):
-                g_re = float(gram[i, j].real)
-                g_im = float(gram[i, j].imag)
-                G_real[i, j] = g_re
-                G_real[i, j + K] = -g_im
-                G_real[i + K, j] = g_im
-                G_real[i + K, j + K] = g_re
+        rhs_arr = np.zeros(dim)
+        rhs_arr[:K] = rhs.real
+        rhs_arr[K:] = rhs.imag
+        G_real[:K, :K] = gram.real
+        G_real[:K, K:] = -gram.imag
+        G_real[K:, :K] = gram.imag
+        G_real[K:, K:] = gram.real
 
-        g = _solve_spd_cholesky(G_real, rhs_real)
+        g = _solve_spd_cholesky(G_real, rhs_arr)
         g_complex = g[:K] + 1j * g[K:]
 
         # Fast residual: ||y - A @ g||² via numpy
@@ -424,6 +421,7 @@ def refine_paths_variable_projection(
         # Scale step down each round
         step_d = step_delay / (1.0 + round_idx)
         step_f = step_doppler / (1.0 + round_idx)
+        accepted_this_round = 0
 
         for l in range(n_paths):
             best_d = d_bins[l]
@@ -534,10 +532,14 @@ def refine_paths_variable_projection(
                 f_bins[l] = best_f
                 resid_old = best_resid
                 total_accepted += 1
+                accepted_this_round += 1
 
-            # After each path update, re-estimate gains jointly
-            if accepted_this:
-                resid_old, _, _ = _compute_residual(d_bins, f_bins)
+        # Early stop if no path improved in this round
+        if accepted_this_round == 0:
+            break
+
+    # Caller (estimated_support_ls_reconstruction) does fresh LS with refined
+    # positions — no need for joint re-estimation here.
 
     # Don't rebuild full dict again; just return refined positions.
     # Gains will be re-estimated by the caller (estimated_support_ls_reconstruction).
@@ -550,7 +552,8 @@ def refine_paths_variable_projection(
 
     diag = {
         "accepted": total_accepted,
-        "rounds": n_rounds,
+        "rounds": round_idx + 1,  # actual rounds executed (may be < n_rounds)
+        "requested_rounds": n_rounds,
         "resid_initial": float(resid_old),  # updated to final after all rounds
     }
     return refined, diag
