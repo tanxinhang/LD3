@@ -30,9 +30,7 @@ dataset:
   max_paths: 8
   token_version: 2
   token_source: estimated
-  token_refine: vp
-  token_vp_rounds: 3
-  token_vp_probes: 8
+  token_refine: ""              # NO VP — isolate if VP code changes caused regression
 
 training:
   epochs: 100
