@@ -15,7 +15,7 @@ Gate 2-A smoke (minimal first step):
 from __future__ import annotations
 
 import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
 import argparse
 import json

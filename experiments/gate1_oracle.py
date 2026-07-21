@@ -14,6 +14,9 @@ Design rules:
   - Multi-seed results report hierarchical CI (seed-level + sample-level)
 """
 
+import os
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 from __future__ import annotations
 
 import argparse
