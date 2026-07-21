@@ -534,6 +534,12 @@ def refine_paths_variable_projection(
                 total_accepted += 1
                 accepted_this_round += 1
 
+            # Joint re-estimate gains after each accepted path update.
+            # This provides the correct LS residual baseline for the NEXT
+            # path's coordinate descent, preventing error accumulation.
+            if accepted_this:
+                resid_old, _, _ = _compute_residual(d_bins, f_bins)
+
         # Early stop if no path improved in this round
         if accepted_this_round == 0:
             break
