@@ -39,6 +39,7 @@ class DatasetConfig:
     token_refine: str = ""  # "" | "vp" — apply continuous refinement to estimated tokens
     token_vp_rounds: int = 3  # VP coordinate descent rounds
     token_vp_probes: int = 8  # VP random probes per path per round
+    token_vp_fast: bool = False  # column-cached Gram update (~4x faster)
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -106,6 +107,7 @@ class SyntheticOFDMISACDataset(Dataset):
                         num_symbols=self.ofdm.num_symbols,
                         n_rounds=self.cfg.token_vp_rounds,
                         n_probes=self.cfg.token_vp_probes,
+                        fast_mode=self.cfg.token_vp_fast,
                     )
                 # LS gain estimation at (possibly refined) DD positions
                 from .oracle import _ridge_ls, _col_norms, _build_raw_dict
