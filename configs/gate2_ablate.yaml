@@ -1,0 +1,47 @@
+# Ablation: strip all new modules, keep only hidden_dim=96 + VP
+# Compare with gate1_estimated to isolate what broke -11.79 dB
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2
+  token_source: estimated
+  token_refine: vp
+  token_vp_rounds: 5
+  token_vp_probes: 12
+
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 96
+  num_threads: 4
+  num_seeds: 1
+  use_quality_gate: false       # OFF
+  use_path_stats: false         # OFF
+  gate_kernel_size: 1           # back to 1x1
