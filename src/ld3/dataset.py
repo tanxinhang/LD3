@@ -40,6 +40,8 @@ class DatasetConfig:
     token_vp_rounds: int = 3  # VP coordinate descent rounds
     token_vp_probes: int = 8  # VP random probes per path per round
     token_vp_fast: bool = False  # column-cached Gram update (~4x faster)
+    dd_oversample_delay: int = 2   # DD grid oversampling factor (delay axis)
+    dd_oversample_doppler: int = 4  # DD grid oversampling factor (doppler axis)
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -90,7 +92,7 @@ class SyntheticOFDMISACDataset(Dataset):
             grid = build_dd_grid(
                 self.ofdm.num_subcarriers, self.ofdm.num_symbols,
                 self.channel.max_delay_bins, self.channel.max_abs_doppler_bins,
-                2, 4,
+                self.cfg.dd_oversample_delay, self.cfg.dd_oversample_doppler,
             )
             score_map, gain_map = masked_matched_filter_map(observed, mask, grid)
             est = detect_paths_nms(

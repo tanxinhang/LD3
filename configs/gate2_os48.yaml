@@ -1,0 +1,80 @@
+# Gate 2 P0 Optimize: normalized gate target + margin + clean-sample ratio
+#
+# Changes from gate2_v1_sup_aug:
+#   1. Normalized gate target: a = (e_tf-e_phys)/(e_tf+e_phys+eps) — scale-invariant
+#   2. Margin mask: only supervise gate where |a| > 0.1 — skip ambiguous positions
+#   3. Clean-sample ratio: 75% of batch samples get NO augmentation
+#   4. Lower gate_sup_weight (0.02) — let NMSE dominate
+#   5. Lower phase_prob + jitter_std
+#
+# Target: Clean NMSE ≤ -10.3 dB, harm rate < 15%
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_p0_optimize.yaml \
+#     --output-dir results/gate2_p0_optimize \
+#     --device cuda
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2
+  token_source: estimated
+  token_refine: vp
+  token_vp_fast: true
+  dd_oversample_delay: 4
+  dd_oversample_doppler: 8
+
+training:
+  epochs: 300
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 3
+  use_quality_gate: true
+  # Gate supervision v2: normalized target + margin mask
+  gate_supervision:
+    weight: 0.02             # lower weight, NMSE dominates
+    temperature: 0.1         # sharpness of oracle target
+    margin: 0.1              # only supervise where |advantage| > 0.1
+  # TF auxiliary loss
+  loss_weights:
+    final: 1.0
+    tf_aux: 0.2
+    physical_aux: 0.0
+  # Mixed augmentation: 75% clean, 25% with graduated corruption
+  token_augmentation:
+    enabled: true
+    clean_ratio: 0.75        # 75% of samples receive NO augmentation
+    batch_dropout_prob: 0.05
+    dropped_token_fraction: 0.3
+    batch_shuffle_prob: 0.00
+    phase_prob: 0.10         # 10% of remaining 25% = ~2.5% effective rate
+    jitter_std: 0.10
+    coherent_false: 1         # 1 coherent false per augmented sample
