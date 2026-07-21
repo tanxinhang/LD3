@@ -376,40 +376,64 @@ def refine_paths_variable_projection(
     # Pilot residual for current positions
     def _compute_residual(d, f):
         K = len(d)
-        # Build dictionary via broadcasting (P × K in one shot)
+        # Build dictionary via broadcasting (P × K) — safe, element-wise ops
         d_arr = np.asarray(d, dtype=np.float64)
         f_arr = np.asarray(f, dtype=np.float64)
-        dph = np.exp(-2j * np.pi * n_idx[:, None] * d_arr[None, :] / N)  # [P, K]
-        fph = np.exp(2j * np.pi * m_idx[:, None] * d_arr[None, :] / M)   # [P, K]
-        A = dph * fph                                                       # [P, K]
+        dph = np.exp(-2j * np.pi * n_idx[:, None] * d_arr[None, :] / N)
+        fph = np.exp(2j * np.pi * m_idx[:, None] * d_arr[None, :] / M)
+        A = dph * fph
         col_norm = np.sqrt(np.sum(np.abs(A) ** 2, axis=0))
         A = A / np.maximum(col_norm, np.finfo(float).eps)
 
-        # Fast path: numpy matmul for Gram and rhs (BLAS-accelerated)
-        gram = A.conj().T @ A  # [K, K]
-        rhs = A.conj().T @ y   # [K]
+        # Manual Gram + RHS: matches old -11.79 dB code path exactly.
+        # Numpy matmul (A.H @ A) produces tiny BLAS-dependent numerical
+        # differences that accumulate over 200+ CD iterations → worse VP.
+        gram = np.zeros((K, K), dtype=np.complex128)
+        rhs = np.zeros(K, dtype=np.complex128)
+        for i in range(K):
+            s_rhs = 0.0 + 0.0j
+            for k in range(n_idx.size):
+                s_rhs += A[k, i].conjugate() * y[k]
+            rhs[i] = s_rhs
+            for j in range(i, K):
+                s = 0.0 + 0.0j
+                for k in range(n_idx.size):
+                    s += A[k, i].conjugate() * A[k, j]
+                gram[i, j] = s
+                if i != j:
+                    gram[j, i] = s.conjugate()
 
-        trace_gram = float(np.trace(gram.real))
+        trace_gram = sum(float(gram[i, i].real) for i in range(K))
         ridge = ridge_relative * trace_gram / max(K, 1)
-        gram = gram + ridge * np.eye(K)
+        for i in range(K):
+            gram[i, i] += ridge
 
         # Solve real system (manual Cholesky — MKL-safe)
         dim = 2 * K
         G_real = np.zeros((dim, dim))
-        rhs_arr = np.zeros(dim)
-        rhs_arr[:K] = rhs.real
-        rhs_arr[K:] = rhs.imag
-        G_real[:K, :K] = gram.real
-        G_real[:K, K:] = -gram.imag
-        G_real[K:, :K] = gram.imag
-        G_real[K:, K:] = gram.real
+        rhs_real = np.zeros(dim)
+        for i in range(K):
+            rhs_real[i] = float(rhs[i].real)
+            rhs_real[i + K] = float(rhs[i].imag)
+            for j in range(K):
+                g_re = float(gram[i, j].real)
+                g_im = float(gram[i, j].imag)
+                G_real[i, j] = g_re
+                G_real[i, j + K] = -g_im
+                G_real[i + K, j] = g_im
+                G_real[i + K, j + K] = g_re
 
-        g = _solve_spd_cholesky(G_real, rhs_arr)
+        g = _solve_spd_cholesky(G_real, rhs_real)
         g_complex = g[:K] + 1j * g[K:]
 
-        # Fast residual: ||y - A @ g||² via numpy
-        pred = A @ g_complex
-        resid = float(np.sum(np.abs(y - pred) ** 2))
+        # Manual residual
+        resid = 0.0
+        for k in range(n_idx.size):
+            pred = 0.0 + 0.0j
+            for l in range(K):
+                pred += A[k, l] * g_complex[l]
+            diff = y[k] - pred
+            resid += float(diff.real ** 2 + diff.imag ** 2)
         return resid, A, g_complex
 
     # Initial residual
