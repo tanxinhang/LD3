@@ -573,7 +573,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     token_ref = str(data_cfg.get("token_refine", ""))
     token_vp_r = int(data_cfg.get("token_vp_rounds", 3))
     token_vp_p = int(data_cfg.get("token_vp_probes", 8))
-    precomp_dir = str(data_cfg.get("precomputed_dir", ""))
     test_cfg_fixed = DatasetConfig(
         size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
@@ -587,7 +586,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_refine=token_ref,
         token_vp_rounds=token_vp_r,
         token_vp_probes=token_vp_p,
-        precomputed_dir=precomp_dir,
     )
     # Fixed validation bank for best-checkpoint selection
     val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))
