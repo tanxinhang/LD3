@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
@@ -343,17 +342,16 @@ def refine_paths_variable_projection(
     step_delay: float = 0.1,
     step_doppler: float = 0.1,
     ridge_relative: float = 1e-6,
-    search_method: str = "random",
 ) -> tuple[EstimatedPaths, dict]:
-    """Refine DD path estimates via variable projection coordinate descent.
+    """Refine DD path estimates via bounded random-probe variable projection.
 
-    search_method:
-      "random" — bounded random probes, monotonic acceptance gate (legacy)
-      "golden" — deterministic golden-section line search per axis
+    For each path, tries small random (τ, ν) perturbations, re-estimates
+    gains via LS, and accepts if pilot residual decreases.  Runs multiple
+    rounds of coordinate descent over all paths.
 
-    For each path, tries perturbations, re-estimates gains via LS, and
-    accepts if pilot residual decreases. Runs multiple rounds of coordinate
-    descent over all paths.
+    This is simpler and more robust than gradient descent — no gradients of
+    the dictionary w.r.t. τ/ν are needed, and monotonicity is guaranteed by
+    the acceptance gate.
 
     Returns (refined_paths, diagnostics).
     """
@@ -375,27 +373,25 @@ def refine_paths_variable_projection(
 
     # Pilot residual for current positions
     def _compute_residual(d, f):
-        K = len(d)
-        # Build dictionary via broadcasting (P × K) — safe, element-wise ops
-        d_arr = np.asarray(d, dtype=np.float64)
-        f_arr = np.asarray(f, dtype=np.float64)
-        dph = np.exp(-2j * np.pi * n_idx[:, None] * d_arr[None, :] / N)
-        fph = np.exp(2j * np.pi * m_idx[:, None] * d_arr[None, :] / M)
-        A = dph * fph
-        col_norm = np.sqrt(np.sum(np.abs(A) ** 2, axis=0))
-        A = A / np.maximum(col_norm, np.finfo(float).eps)
+        A = np.zeros((n_idx.size, len(d)), dtype=np.complex128)
+        for l in range(len(d)):
+            dph = np.exp(-2j * np.pi * n_idx * d[l] / N)
+            fph = np.exp(2j * np.pi * m_idx * f[l] / M)
+            A[:, l] = dph * fph
+            # Normalise column (consistent LS regularisation)
+            col_norm = np.sqrt(np.sum(np.abs(A[:, l]) ** 2))
+            if col_norm > np.finfo(float).eps:
+                A[:, l] /= col_norm
 
-        # Manual Gram + RHS: matches old -11.79 dB code path exactly.
-        # Numpy matmul (A.H @ A) produces tiny BLAS-dependent numerical
-        # differences that accumulate over 200+ CD iterations → worse VP.
-        gram = np.zeros((K, K), dtype=np.complex128)
-        rhs = np.zeros(K, dtype=np.complex128)
-        for i in range(K):
+        # Ridge LS
+        gram = np.zeros((len(d), len(d)), dtype=np.complex128)
+        rhs = np.zeros(len(d), dtype=np.complex128)
+        for i in range(len(d)):
             s_rhs = 0.0 + 0.0j
             for k in range(n_idx.size):
                 s_rhs += A[k, i].conjugate() * y[k]
             rhs[i] = s_rhs
-            for j in range(i, K):
+            for j in range(i, len(d)):
                 s = 0.0 + 0.0j
                 for k in range(n_idx.size):
                     s += A[k, i].conjugate() * A[k, j]
@@ -403,34 +399,34 @@ def refine_paths_variable_projection(
                 if i != j:
                     gram[j, i] = s.conjugate()
 
-        trace_gram = sum(float(gram[i, i].real) for i in range(K))
-        ridge = ridge_relative * trace_gram / max(K, 1)
-        for i in range(K):
+        trace_gram = sum(float(gram[i, i].real) for i in range(len(d)))
+        ridge = ridge_relative * trace_gram / max(len(d), 1)
+        for i in range(len(d)):
             gram[i, i] += ridge
 
         # Solve real system (manual Cholesky — MKL-safe)
-        dim = 2 * K
+        dim = 2 * len(d)
         G_real = np.zeros((dim, dim))
         rhs_real = np.zeros(dim)
-        for i in range(K):
+        for i in range(len(d)):
             rhs_real[i] = float(rhs[i].real)
-            rhs_real[i + K] = float(rhs[i].imag)
-            for j in range(K):
+            rhs_real[i + len(d)] = float(rhs[i].imag)
+            for j in range(len(d)):
                 g_re = float(gram[i, j].real)
                 g_im = float(gram[i, j].imag)
                 G_real[i, j] = g_re
-                G_real[i, j + K] = -g_im
-                G_real[i + K, j] = g_im
-                G_real[i + K, j + K] = g_re
+                G_real[i, j + len(d)] = -g_im
+                G_real[i + len(d), j] = g_im
+                G_real[i + len(d), j + len(d)] = g_re
 
         g = _solve_spd_cholesky(G_real, rhs_real)
-        g_complex = g[:K] + 1j * g[K:]
+        g_complex = g[:len(d)] + 1j * g[len(d):]
 
-        # Manual residual
+        # Compute residual ||y - A g||²
         resid = 0.0
         for k in range(n_idx.size):
             pred = 0.0 + 0.0j
-            for l in range(K):
+            for l in range(len(d)):
                 pred += A[k, l] * g_complex[l]
             diff = y[k] - pred
             resid += float(diff.real ** 2 + diff.imag ** 2)
@@ -445,7 +441,6 @@ def refine_paths_variable_projection(
         # Scale step down each round
         step_d = step_delay / (1.0 + round_idx)
         step_f = step_doppler / (1.0 + round_idx)
-        accepted_this_round = 0
 
         for l in range(n_paths):
             best_d = d_bins[l]
@@ -453,123 +448,35 @@ def refine_paths_variable_projection(
             best_resid = resid_old
             accepted_this = False
 
-            if search_method == "golden":
-                # --- Golden-section line search per axis ---
-                phi = (math.sqrt(5.0) - 1.0) / 2.0  # 0.618...
+            # Try N probes in random directions
+            for _ in range(n_probes):
+                d_probe = d_bins[l] + step_d * (rng.uniform(-1, 1))
+                f_probe = f_bins[l] + step_f * (rng.uniform(-1, 1))
+                # Clamp to physical range
+                d_probe = max(0.0, d_probe)
+                f_probe = max(-3.0, min(3.0, f_probe))
 
-                def _golden_search_1d(
-                    x0: float, direction: str, step: float,
-                    lo_bound: float, hi_bound: float,
-                    d_bins_base: np.ndarray, f_bins_base: np.ndarray,
-                ) -> tuple[float, float]:
-                    """Golden-section search along delay or doppler axis."""
-                    a = max(lo_bound, x0 - step)
-                    b = min(hi_bound, x0 + step)
-                    if b - a < 0.001:  # already converged
-                        return x0, best_resid
+                d_trial = d_bins.copy()
+                f_trial = f_bins.copy()
+                d_trial[l] = d_probe
+                f_trial[l] = f_probe
 
-                    c = b - phi * (b - a)
-                    d = a + phi * (b - a)
-                    n_iter = max(8, int(math.log(0.001 / (b - a + 1e-8)) / math.log(phi)) + 3)
-
-                    # Evaluate at c and d
-                    for _ in range(n_iter // 2):
-                        # Eval at c
-                        d_trial = d_bins_base.copy()
-                        f_trial = f_bins_base.copy()
-                        if direction == "delay":
-                            d_trial[l] = c
-                        else:
-                            f_trial[l] = c
-                        rc, _, _ = _compute_residual(d_trial, f_trial)
-
-                        # Eval at d
-                        d_trial = d_bins_base.copy()
-                        f_trial = f_bins_base.copy()
-                        if direction == "delay":
-                            d_trial[l] = d
-                        else:
-                            f_trial[l] = d
-                        rd, _, _ = _compute_residual(d_trial, f_trial)
-
-                        if rc < rd:
-                            b = d
-                            d = c
-                            c = b - phi * (b - a)
-                        else:
-                            a = c
-                            c = d
-                            d = a + phi * (b - a)
-
-                        if b - a < 0.001:
-                            break
-
-                    x_best = (a + b) / 2.0
-                    # Final eval at best
-                    d_trial = d_bins_base.copy()
-                    f_trial = f_bins_base.copy()
-                    if direction == "delay":
-                        d_trial[l] = x_best
-                    else:
-                        f_trial[l] = x_best
-                    r_best, _, _ = _compute_residual(d_trial, f_trial)
-                    return x_best, r_best
-
-                # Golden-section on delay axis
-                new_d, resid_d = _golden_search_1d(
-                    d_bins[l], "delay", step_d, 0.0, 12.0, d_bins, f_bins,
-                )
-                if resid_d < best_resid:
-                    best_d, best_resid = new_d, resid_d
+                resid_new, _, _ = _compute_residual(d_trial, f_trial)
+                if resid_new < best_resid:
+                    best_resid = resid_new
+                    best_d = d_probe
+                    best_f = f_probe
                     accepted_this = True
-
-                # Golden-section on doppler axis
-                new_f, resid_f = _golden_search_1d(
-                    f_bins[l], "doppler", step_f, -3.0, 3.0, d_bins, f_bins,
-                )
-                if resid_f < best_resid:
-                    best_f, best_resid = new_f, resid_f
-                    accepted_this = True
-
-            else:
-                # --- Legacy random probes ---
-                for _ in range(n_probes):
-                    d_probe = d_bins[l] + step_d * (rng.uniform(-1, 1))
-                    f_probe = f_bins[l] + step_f * (rng.uniform(-1, 1))
-                    d_probe = max(0.0, d_probe)
-                    f_probe = max(-3.0, min(3.0, f_probe))
-
-                    d_trial = d_bins.copy()
-                    f_trial = f_bins.copy()
-                    d_trial[l] = d_probe
-                    f_trial[l] = f_probe
-
-                    resid_new, _, _ = _compute_residual(d_trial, f_trial)
-                    if resid_new < best_resid:
-                        best_resid = resid_new
-                        best_d = d_probe
-                        best_f = f_probe
-                        accepted_this = True
 
             if accepted_this:
                 d_bins[l] = best_d
                 f_bins[l] = best_f
                 resid_old = best_resid
                 total_accepted += 1
-                accepted_this_round += 1
 
-            # Joint re-estimate gains after each accepted path update.
-            # This provides the correct LS residual baseline for the NEXT
-            # path's coordinate descent, preventing error accumulation.
+            # After each path update, re-estimate gains jointly
             if accepted_this:
                 resid_old, _, _ = _compute_residual(d_bins, f_bins)
-
-        # Early stop if no path improved in this round
-        if accepted_this_round == 0:
-            break
-
-    # Caller (estimated_support_ls_reconstruction) does fresh LS with refined
-    # positions — no need for joint re-estimation here.
 
     # Don't rebuild full dict again; just return refined positions.
     # Gains will be re-estimated by the caller (estimated_support_ls_reconstruction).
@@ -582,8 +489,7 @@ def refine_paths_variable_projection(
 
     diag = {
         "accepted": total_accepted,
-        "rounds": round_idx + 1,  # actual rounds executed (may be < n_rounds)
-        "requested_rounds": n_rounds,
+        "rounds": n_rounds,
         "resid_initial": float(resid_old),  # updated to final after all rounds
     }
     return refined, diag
