@@ -449,8 +449,8 @@ def train_model(
                 # Margin mask: only supervise where experts clearly differ
                 margin = advantage.abs()
                 mask = (margin > gate_sup_margin).to(g_map.dtype)  # [B, 1, N, M]
-                mask_weight = mask.sum() / mask.numel() if mask.sum() > 0 else 1.0
-                mask = mask / mask_weight.clamp_min(0.01)  # normalise to maintain loss scale
+                mask_weight = max(float(mask.sum() / mask.numel()), 0.01)
+                mask = mask / mask_weight  # normalise to maintain loss scale
 
                 # BCE with margin-masked supervision
                 g_safe = g_map.clamp(1e-7, 1.0 - 1e-7)
