@@ -670,6 +670,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     gate_sup_margin = float(training.get("gate_supervision", {}).get("margin", 0.0))
     residual_warmup = int(training.get("residual_warmup_epochs", 0))
     zero_init_residual = bool(training.get("zero_init_residual", True))
+    use_token_refiner = bool(training.get("use_token_refiner", False))
 
     # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
     per_seed_nmse: dict[str, list[np.ndarray]] = {}
@@ -754,6 +755,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     use_path_stats=use_path_stats,
                     gate_kernel_size=gate_kernel_size,
                     zero_init_residual=zero_init_residual,
+                    use_token_refiner=use_token_refiner,
                 ),
                 "physical_residual", "physical_residual",
             ),

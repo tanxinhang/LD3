@@ -408,6 +408,33 @@ def _build_path_stats(
     return stats  # [B, 7, N, M]
 
 
+class DDTokenRefiner(nn.Module):
+    """Learned DD fractional position correction — replaces VP as differentiable layer.
+
+    Given coarse (τ, ν) from OMP/NMS, predicts bounded Δτ, Δν per path.
+    PhysicalReconstructor is differentiable, so NMSE gradient flows back to refiner.
+    """
+    def __init__(self, token_dim: int = 9, hidden: int = 16):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(token_dim, hidden), nn.GELU(),
+            nn.Linear(hidden, hidden), nn.GELU(),
+            nn.Linear(hidden, 2),  # Δτ, Δν
+        )
+        self.max_correction = 0.5  # ±0.5 bin (sub-grid range)
+
+    def forward(self, tokens: torch.Tensor, valid: torch.Tensor
+                ) -> torch.Tensor:
+        """Return refined tokens with Δτ, Δν applied to valid paths only."""
+        delta = self.net(tokens)  # [B, L, 2]
+        delta = torch.tanh(delta) * self.max_correction
+        refined = tokens.clone()
+        valid_f = valid.to(tokens.dtype).unsqueeze(-1)
+        refined[:, :, 0] += delta[:, :, 0] * valid_f.squeeze(-1)
+        refined[:, :, 1] += delta[:, :, 1] * valid_f.squeeze(-1)
+        return refined
+
+
 class PhysicalResidualEstimator(nn.Module):
     """TF–DD gated residual estimator — Gate 1-D1 / Gate 2-C target architecture.
 
@@ -436,10 +463,14 @@ class PhysicalResidualEstimator(nn.Module):
         use_path_stats: bool = False,
         gate_kernel_size: int = 1,
         zero_init_residual: bool = True,
+        use_token_refiner: bool = False,
     ) -> None:
         super().__init__()
         self.use_quality_gate = use_quality_gate
         self.use_path_stats = use_path_stats
+        self.use_token_refiner = use_token_refiner
+        if use_token_refiner:
+            self.token_refiner = DDTokenRefiner()
         self.tf_encoder = TFEncoder(hidden_dim)
         self.physics = PhysicalReconstructor(num_subcarriers, num_symbols)
 
@@ -491,7 +522,11 @@ class PhysicalResidualEstimator(nn.Module):
         tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
         H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
 
-        # 2. Explicit physical reconstruction
+        # 2. Learned DD position refinement (replaces VP as differentiable layer)
+        if self.use_token_refiner:
+            path_tokens = self.token_refiner(path_tokens, path_valid)
+
+        # 3. Explicit physical reconstruction
         H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
 
         # 3. Gated fusion
