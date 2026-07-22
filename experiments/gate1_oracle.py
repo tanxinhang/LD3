@@ -288,14 +288,14 @@ def train_model(
     gate_sup_weight: float = 0.0,
     gate_sup_temperature: float = 0.1,
     gate_sup_margin: float = 0.0,
+    residual_warmup_epochs: int = 0,
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
-    Returns (history, best_model_state_dict).  If val_loader is None, the
-    final model state is returned as "best".
-
-    model_type: "none" | "legacy_cross" | "physical_residual"
-      - physical_residual adds a gate bias loss to encourage trusting H_phys
+    When residual_warmup_epochs > 0 and model_type == "physical_residual":
+      - First residual_warmup_epochs: residual head FROZEN, train only gate+TF
+      - After warmup: unfreeze residual, joint training
+      This prevents the zero-init residual from dominating early training.
     """
     model.to(device)
     optimizer = torch.optim.AdamW(
@@ -308,7 +308,16 @@ def train_model(
     best_val_nmse = float("inf")
     best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
+    # Phase training: freeze residual head during warmup
+    if residual_warmup_epochs > 0 and model_type == "physical_residual":
+        model.freeze_residual()
+        print(f"  Residual frozen for {residual_warmup_epochs} epochs (gate-only warmup)")
+
     for epoch in range(1, epochs + 1):
+        if residual_warmup_epochs > 0 and epoch == residual_warmup_epochs + 1 \
+                and model_type == "physical_residual":
+            model.unfreeze_residual()
+            print(f"  Residual unfrozen at epoch {epoch} (joint training)")
         model.train()
         losses: list[float] = []
         for batch in loader:
@@ -659,6 +668,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     gate_sup_weight = float(training.get("gate_supervision", {}).get("weight", 0.0))
     gate_sup_temperature = float(training.get("gate_supervision", {}).get("temperature", 0.1))
     gate_sup_margin = float(training.get("gate_supervision", {}).get("margin", 0.0))
+    residual_warmup = int(training.get("residual_warmup_epochs", 0))
+    zero_init_residual = bool(training.get("zero_init_residual", True))
 
     # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
     per_seed_nmse: dict[str, list[np.ndarray]] = {}
@@ -742,6 +753,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     use_quality_gate=use_quality_gate,
                     use_path_stats=use_path_stats,
                     gate_kernel_size=gate_kernel_size,
+                    zero_init_residual=zero_init_residual,
                 ),
                 "physical_residual", "physical_residual",
             ),
@@ -782,6 +794,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 gate_sup_weight=gate_sup_weight,
                 gate_sup_temperature=gate_sup_temperature,
                 gate_sup_margin=gate_sup_margin,
+                residual_warmup_epochs=residual_warmup,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)

@@ -435,6 +435,7 @@ class PhysicalResidualEstimator(nn.Module):
         use_quality_gate: bool = False,
         use_path_stats: bool = False,
         gate_kernel_size: int = 1,
+        zero_init_residual: bool = True,
     ) -> None:
         super().__init__()
         self.use_quality_gate = use_quality_gate
@@ -468,8 +469,9 @@ class PhysicalResidualEstimator(nn.Module):
             nn.GELU(),
             nn.Conv2d(hidden_dim, 2, 1),
         )
-        nn.init.zeros_(self.residual[-1].weight)
-        nn.init.zeros_(self.residual[-1].bias)
+        if zero_init_residual:
+            nn.init.zeros_(self.residual[-1].weight)
+            nn.init.zeros_(self.residual[-1].bias)
 
     def forward(
         self,
@@ -558,6 +560,16 @@ class PhysicalResidualEstimator(nn.Module):
             diagnostics["E_phys"] = H_phys + delta  # Physical expert
             diagnostics["E_tf"] = H_tf              # TF expert
         return H_out, diagnostics
+
+    def freeze_residual(self) -> None:
+        """Freeze residual head for phase training."""
+        for p in self.residual.parameters():
+            p.requires_grad = False
+
+    def unfreeze_residual(self) -> None:
+        """Unfreeze residual head after warmup."""
+        for p in self.residual.parameters():
+            p.requires_grad = True
 
 
 # ---------------------------------------------------------------------------

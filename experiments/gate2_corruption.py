@@ -421,6 +421,7 @@ def main() -> None:
     use_quality_gate = bool(training_cfg.get("use_quality_gate", False))
     use_path_stats = bool(training_cfg.get("use_path_stats", False))
     gate_kernel_size = int(training_cfg.get("gate_kernel_size", 1))
+    zero_init_residual = bool(training_cfg.get("zero_init_residual", True))
     # Try estimated_residual first, then physics_residual
     model = PhysicalResidualEstimator(
         hidden_dim=hidden_dim,
@@ -429,6 +430,7 @@ def main() -> None:
         use_quality_gate=use_quality_gate,
         use_path_stats=use_path_stats,
         gate_kernel_size=gate_kernel_size,
+        zero_init_residual=zero_init_residual,
     ).to(device)
 
     model_pt = args.model_dir / "estimated_residual_seed0.pt"
