@@ -44,6 +44,7 @@ from ld3.dataset import DatasetConfig, SyntheticOFDMISACDataset
 from ld3.dd_estimation import (
     build_dd_grid,
     detect_paths_nms,
+    detect_paths_omp,
     masked_matched_filter_map,
 )
 from ld3.metrics import nmse_loss, nmse_numpy, nmse_torch
@@ -112,6 +113,7 @@ def _evaluate_non_learned_with_samples(
     nmse_perfect_vals: list[float] = []
     nmse_oracle_support_ls_vals: list[float] = []
     nmse_estimated_support_ls_vals: list[float] = []
+    nmse_omp_support_ls_vals: list[float] = []
     nmse_initial_vals: list[float] = []
 
     for idx in range(cfg.size):
@@ -159,6 +161,19 @@ def _evaluate_non_learned_with_samples(
         )
         nmse_estimated_support_ls_vals.append(nmse_numpy(H_dd_ls, truth))
 
+        # Gate 1-C v2: OMP-estimated support + LS
+        est_paths_omp = detect_paths_omp(
+            score_map, gain_map, grid,
+            num_paths=channel.num_paths,
+            pilot_observations=observed, pilot_mask=mask,
+            num_subcarriers=ofdm.num_subcarriers,
+            num_symbols=ofdm.num_symbols,
+        )
+        H_omp_ls = estimated_support_ls_reconstruction(
+            ofdm, est_paths_omp, observed, mask
+        )
+        nmse_omp_support_ls_vals.append(nmse_numpy(H_omp_ls, truth))
+
     def stats(vals: list[float]) -> dict[str, float]:
         arr = np.array(vals)
         return {
@@ -172,12 +187,14 @@ def _evaluate_non_learned_with_samples(
         "nmse_oracle_perfect": np.array(nmse_perfect_vals),
         "nmse_oracle_support_ls": np.array(nmse_oracle_support_ls_vals),
         "nmse_estimated_support_ls": np.array(nmse_estimated_support_ls_vals),
+        "nmse_omp_support_ls": np.array(nmse_omp_support_ls_vals),
         "nmse_initial_interpolation": np.array(nmse_initial_vals),
     }
     summary = {
         "nmse_oracle_perfect": stats(nmse_perfect_vals),
         "nmse_oracle_support_ls": stats(nmse_oracle_support_ls_vals),
         "nmse_estimated_support_ls": stats(nmse_estimated_support_ls_vals),
+        "nmse_omp_support_ls": stats(nmse_omp_support_ls_vals),
         "nmse_initial_interpolation": stats(nmse_initial_vals),
     }
     return summary, per_sample
@@ -1059,6 +1076,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     print(f"  Gate 1-A (Oracle perfect):       NMSE={nmse_perfect:+.3f} dB")
     print(f"  Gate 1-B (Oracle support + LS):  NMSE={nmse_oracle_ls:+.3f} dB")
     print(f"  Gate 1-C (Estimated support + LS): NMSE={nmse_est_ls:+.3f} dB")
+    nmse_omp_ls = non_learned_test["nmse_omp_support_ls"]["nmse_db"]
+    print(f"  Gate 1-C (OMP support + LS):       NMSE={nmse_omp_ls:+.3f} dB")
     print(f"  Initial interpolation:           NMSE={nmse_initial:+.3f} dB")
     print(f"  Δ_gain   = Oracle+LS - Perfect  = {nmse_oracle_ls - nmse_perfect:+.3f} dB")
     print(f"  Δ_support = Est+LS - Oracle+LS  = {nmse_est_ls - nmse_oracle_ls:+.3f} dB")

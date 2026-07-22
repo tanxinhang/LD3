@@ -172,6 +172,135 @@ def detect_paths_nms(
     )
 
 
+def detect_paths_omp(
+    score_map: np.ndarray,
+    gain_map: np.ndarray,
+    grid: DDGrid,
+    num_paths: int,
+    pilot_observations: np.ndarray,
+    pilot_mask: np.ndarray,
+    num_subcarriers: int,
+    num_symbols: int,
+) -> EstimatedPaths:
+    """Orthogonal Matching Pursuit for DD path detection.
+
+    Iteratively selects dictionary columns that best explain the residual
+    pilot observations. Unlike NMS which peaks-picks from a score map,
+    OMP minimises residual energy directly.
+
+    OMP is unaffected by the over-sampling dilemma: finer grids provide
+    more candidates and OMP benefits, while NMS suffers from false peaks.
+    """
+    n_idx, m_idx = np.nonzero(pilot_mask)
+    if n_idx.size == 0:
+        return EstimatedPaths(
+            delay_bins=np.array([], dtype=np.float64),
+            doppler_bins=np.array([], dtype=np.float64),
+            scores=np.array([], dtype=np.float64),
+            gains=np.array([], dtype=np.complex128),
+        )
+
+    y = pilot_observations[pilot_mask].copy()
+    N = num_subcarriers
+    M = num_symbols
+
+    n_delay = grid.delay_bins.size
+    n_doppler = grid.doppler_bins.size
+    n_total = n_delay * n_doppler
+
+    # Build full dictionary A [P, n_total] (one-off, used for inner products)
+    # Pre-compute delay/doppler phases
+    delay_phase = np.exp(-2j * np.pi * n_idx[:, None] * grid.delay_bins[None, :] / N)  # [P, n_d]
+    doppler_phase = np.exp(2j * np.pi * m_idx[:, None] * grid.doppler_bins[None, :] / M)  # [P, n_f]
+
+    selected_delays: list[float] = []
+    selected_dopplers: list[float] = []
+    selected_scores: list[float] = []
+    selected_gains: list[complex] = []
+
+    # Column norms for dictionary normalisation
+    col_norms = np.sqrt(np.sum(np.abs(
+        delay_phase[:, :, None] * doppler_phase[:, None, :]
+    ).reshape(n_idx.size, -1) ** 2, axis=0))
+    # Avoid building the full [P, n_total] matrix at once — compute on the fly
+
+    residual = y.copy()
+    support_indices: list[int] = []
+    A_support: np.ndarray = np.zeros((n_idx.size, 0), dtype=np.complex128)
+
+    for k in range(num_paths):
+        # Compute inner products with ALL dictionary columns efficiently
+        # corr[i,j] = |col_{i,j}^H · residual|
+        # col_{i,j} = delay_phase[:,i] * doppler_phase[:,j]
+        # corr_{i,j} = |sum_p conj(delay_phase[p,i]) * conj(doppler_phase[p,j]) * residual[p]|
+
+        # Precompute weighted residual per delay bin
+        w = np.conj(delay_phase) * residual[:, None]  # [P, n_d]
+        # Correlate with doppler phase
+        corr = np.abs(np.einsum('pd,pf->df', w, np.conj(doppler_phase)))  # [n_d, n_f]
+        corr = corr / np.maximum(col_norms.reshape(n_delay, n_doppler), np.finfo(float).eps)
+
+        # Find max
+        flat_idx = int(np.argmax(corr))
+        di, dj = np.unravel_index(flat_idx, (n_delay, n_doppler))
+
+        # Check if already selected (shouldn't happen if we did proper LS, but guard)
+        if (di, dj) in [(int(np.argmin(np.abs(grid.delay_bins - sd))),
+                         int(np.argmin(np.abs(grid.doppler_bins - sf))))
+                        for sd, sf in zip(selected_delays, selected_dopplers)]:
+            continue
+
+        # Build column for this DD bin
+        col = delay_phase[:, di] * doppler_phase[:, dj]
+        col_norm = float(np.sqrt(np.sum(np.abs(col) ** 2)))
+        if col_norm > np.finfo(float).eps:
+            col = col / col_norm
+
+        # Extend support
+        A_support = np.column_stack([A_support, col])
+        support_indices.append((di, dj))
+
+        # Ridge LS on support
+        gram = A_support.conj().T @ A_support  # [k+1, k+1]
+        rhs = A_support.conj().T @ y
+        trace = float(np.trace(gram.real))
+        ridge = 1e-6 * trace / max(k + 1, 1)
+        gram = gram + ridge * np.eye(k + 1)
+
+        # Solve via manual Cholesky
+        dim = 2 * (k + 1)
+        G_real = np.zeros((dim, dim))
+        rhs_real = np.zeros(dim)
+        for i in range(k + 1):
+            rhs_real[i] = float(rhs[i].real)
+            rhs_real[i + k + 1] = float(rhs[i].imag)
+            for j in range(k + 1):
+                g_re = float(gram[i, j].real)
+                g_im = float(gram[i, j].imag)
+                G_real[i, j] = g_re
+                G_real[i, j + k + 1] = -g_im
+                G_real[i + k + 1, j] = g_im
+                G_real[i + k + 1, j + k + 1] = g_re
+
+        g_vec = _solve_spd_cholesky(G_real, rhs_real)
+        g_cplx = g_vec[:k + 1] + 1j * g_vec[k + 1:]
+
+        # Update residual
+        residual = y - A_support @ g_cplx
+
+        selected_delays.append(float(grid.delay_bins[di]))
+        selected_dopplers.append(float(grid.doppler_bins[dj]))
+        selected_scores.append(float(corr[di, dj] / np.max(np.abs(corr))))
+        selected_gains.append(complex(g_cplx[k]))
+
+    return EstimatedPaths(
+        delay_bins=np.asarray(selected_delays, dtype=np.float64),
+        doppler_bins=np.asarray(selected_dopplers, dtype=np.float64),
+        scores=np.asarray(selected_scores, dtype=np.float64),
+        gains=np.asarray(selected_gains, dtype=np.complex128),
+    )
+
+
 def refine_paths_quadratic(
     est: EstimatedPaths,
     score_map: np.ndarray,
