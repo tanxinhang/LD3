@@ -45,7 +45,7 @@ dataset:
   max_paths: 8
   token_version: 2
   token_source: estimated
-  token_refine: vp
+  token_refine: ""  # VP removed — use OMP+Refiner
   token_vp_fast: true
   detector_method: omp
 

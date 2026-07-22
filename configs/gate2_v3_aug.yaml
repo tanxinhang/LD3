@@ -1,5 +1,14 @@
-# A/B test: single SNR=10dB with VP + full optimizations
-# Compare with gate2_snr5_20_test.yaml to isolate multi-SNR effect
+# Gate 2 Token v3 + Augmentation (NO gate supervision)
+#
+# Controlled ablation: v3 token (84-dim DD patch) + corruption aug,
+# WITHOUT gate supervision. Isolates whether 84-dim token alone benefits
+# from seeing corrupted data during training.
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_v3_aug.yaml \
+#     --output-dir results/gate2_v3_aug \
+#     --device cuda
 
 seed: 2036
 device: cuda
@@ -28,36 +37,21 @@ dataset:
   pilot_density: 0.125
   pilot_pattern: random
   max_paths: 8
-  token_version: 2
+  token_version: 3
   token_source: estimated
-  token_refine: ""  # VP removed — use OMP+Refiner
-  token_vp_rounds: 5
-  token_vp_probes: 12
 
 training:
-  epochs: 100
+  epochs: 300
   batch_size: 64
   learning_rate: 0.001
   weight_decay: 0.00001
-  hidden_dim: 96
+  hidden_dim: 48
   num_threads: 4
-  num_seeds: 1
+  num_seeds: 3
   use_quality_gate: true
-  use_path_stats: true
-  gate_kernel_size: 3
-  gate_supervision:
-    weight: 0.05
-    temperature: 0.1
-    margin: 0.05
-  loss_weights:
-    final: 1.0
-    tf_aux: 0.2
-    physical_aux: 0.0
+  # NO gate supervision — test whether 84-dim + aug alone helps
   token_augmentation:
     enabled: true
-    clean_ratio: 0.75
-    batch_dropout_prob: 0.05
+    batch_dropout_prob: 0.15
     dropped_token_fraction: 0.3
-    phase_prob: 0.10
-    jitter_std: 0.10
-    coherent_false: 1
+    batch_shuffle_prob: 0.10

@@ -43,7 +43,7 @@ dataset:
   max_paths: 8
   token_version: 2
   token_source: estimated
-  token_refine: vp              # VP continuous refinement (largest single gain)
+  token_refine: ""  # VP removed — use OMP+Refiner              # VP continuous refinement (largest single gain)
   token_vp_rounds: 5            # More VP rounds
   token_vp_probes: 12           # More probes per round
 
