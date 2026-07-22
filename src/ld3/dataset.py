@@ -11,6 +11,7 @@ from .interpolation import nearest_smooth_interpolation
 from .dd_estimation import (
     build_dd_grid,
     detect_paths_nms,
+    detect_paths_omp,
     masked_matched_filter_map,
     refine_paths_variable_projection,
 )
@@ -42,6 +43,7 @@ class DatasetConfig:
     token_vp_fast: bool = False  # column-cached Gram update (~4x faster)
     dd_oversample_delay: int = 2   # DD grid oversampling factor (delay axis)
     dd_oversample_doppler: int = 4  # DD grid oversampling factor (doppler axis)
+    detector_method: str = "nms"  # "nms" | "omp" — DD path detection algorithm
 
 
 class SyntheticOFDMISACDataset(Dataset):
@@ -95,9 +97,18 @@ class SyntheticOFDMISACDataset(Dataset):
                 self.cfg.dd_oversample_delay, self.cfg.dd_oversample_doppler,
             )
             score_map, gain_map = masked_matched_filter_map(observed, mask, grid)
-            est = detect_paths_nms(
-                score_map, gain_map, grid, num_paths=self.channel.num_paths,
-            )
+            if self.cfg.detector_method == "omp":
+                est = detect_paths_omp(
+                    score_map, gain_map, grid,
+                    num_paths=self.channel.num_paths,
+                    pilot_observations=observed, pilot_mask=mask,
+                    num_subcarriers=self.ofdm.num_subcarriers,
+                    num_symbols=self.ofdm.num_symbols,
+                )
+            else:
+                est = detect_paths_nms(
+                    score_map, gain_map, grid, num_paths=self.channel.num_paths,
+                )
             if len(est.delay_bins) > 0:
                 # Optional: VP continuous refinement
                 if self.cfg.token_refine == "vp":

@@ -593,6 +593,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     token_vp_fast = bool(data_cfg.get("token_vp_fast", False))
     dd_os_delay = int(data_cfg.get("dd_oversample_delay", 2))
     dd_os_doppler = int(data_cfg.get("dd_oversample_doppler", 4))
+    detector_method = str(data_cfg.get("detector_method", "nms"))
     test_cfg_fixed = DatasetConfig(
         size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
@@ -609,6 +610,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_vp_fast=token_vp_fast,
         dd_oversample_delay=dd_os_delay,
         dd_oversample_doppler=dd_os_doppler,
+        detector_method=detector_method,
     )
     # Fixed validation bank for best-checkpoint selection
     val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))

@@ -403,9 +403,16 @@ def main() -> None:
         pilot_density=float(data_cfg["pilot_density"]),
         pilot_pattern=str(data_cfg["pilot_pattern"]),
         max_paths=int(data_cfg["max_paths"]),
-        seed=config.get("seed", 2036) + 50000,  # independent from training/test banks
+        seed=config.get("seed", 2036) + 50000,
         token_version=int(data_cfg.get("token_version", 2)),
         token_source=str(data_cfg.get("token_source", "oracle")),
+        token_refine=str(data_cfg.get("token_refine", "")),
+        token_vp_rounds=int(data_cfg.get("token_vp_rounds", 3)),
+        token_vp_probes=int(data_cfg.get("token_vp_probes", 8)),
+        token_vp_fast=bool(data_cfg.get("token_vp_fast", False)),
+        dd_oversample_delay=int(data_cfg.get("dd_oversample_delay", 2)),
+        dd_oversample_doppler=int(data_cfg.get("dd_oversample_doppler", 4)),
+        detector_method=str(data_cfg.get("detector_method", "nms")),
     )
     test_dataset = SyntheticOFDMISACDataset(ofdm, channel, test_cfg)
 
