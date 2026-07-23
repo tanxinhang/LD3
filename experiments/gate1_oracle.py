@@ -408,6 +408,9 @@ def train_model(
                                 pt[b, fi, 7] = pt[b, anchor_idx, 7] * 0.4
                                 pt[b, fi, 8] = pt[b, anchor_idx, 8] * 0.4
                                 pv[b, fi] = True
+                                # Zero patch fields for fake tokens (dims 9+) — no DD evidence
+                                if pt.shape[2] > 9:
+                                    pt[b, fi, 9:] = 0.0
 
                     # Restore clean samples (not selected for augmentation)
                     if aug_clean_ratio > 0:
