@@ -677,7 +677,7 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_ver = int(data_cfg.get("token_version", 1))
         if token_ver >= 3:
             patch_size = (2 * 2 + 1) ** 2  # R=2 → 25
-            token_dim_in = 9 + patch_size + 2 * patch_size  # 9 + 25 + 50 = 84
+            token_dim_in = 18  # 9 scalar + 9 patch (3x3 score_map)
         else:
             token_dim_in = 5 + 2 * token_ver  # v1→7 dims, v2→9 dims
         # Model group: "tf_baseline" | "dd_attention" | "physical_residual"
