@@ -55,9 +55,9 @@ training:
   use_token_refiner: true       # DDTokenRefiner in model
   gate_kernel_size: 3
   gate_supervision:
-    weight: 0.05
+    weight: 0.01             # lower: DDTokenRefiner needs stability
     temperature: 0.1
-    margin: 0.05
+    margin: 0.1
   loss_weights:
     final: 1.0
     tf_aux: 0.2

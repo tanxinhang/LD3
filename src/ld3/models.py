@@ -427,11 +427,14 @@ class DDTokenRefiner(nn.Module):
                 ) -> torch.Tensor:
         """Return refined tokens with Δτ, Δν applied to valid paths only."""
         delta = self.net(tokens)  # [B, L, 2]
-        delta = torch.tanh(delta) * self.max_correction
+        delta = torch.tanh(delta) * self.max_correction  # bounded ±0.5
         refined = tokens.clone()
         valid_f = valid.to(tokens.dtype).unsqueeze(-1)
         refined[:, :, 0] += delta[:, :, 0] * valid_f.squeeze(-1)
         refined[:, :, 1] += delta[:, :, 1] * valid_f.squeeze(-1)
+        # Clamp to physical range after correction
+        refined[:, :, 0].clamp_(0.0, 12.0)   # delay ∈ [0, 12]
+        refined[:, :, 1].clamp_(-3.0, 3.0)   # doppler ∈ [-3, 3]
         return refined
 
 
