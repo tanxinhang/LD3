@@ -338,15 +338,13 @@ def main() -> None:
     # --- 6. Gate × Residual factorial ablation (decoupled switches) ---
     print("\n6. Gate x Residual factorial ablation (frozen model, forward-only)...")
     ablation_specs = {
-        "fixed_nores":      ("Fixed lam, no DeltaH",      "fixed", False, "none"),
-        "spatial_nores":    ("Spatial gate, no DeltaH",   "spatial", False, "none"),
-        "fixed_res":        ("Fixed lam + DeltaH",        "fixed", True, "none"),
-        "spatial_res":      ("Spatial gate + DeltaH",     "spatial", True, "none"),
-        "fixed_res_gate":   ("Fixed lam + gate*DeltaH",   "fixed", True, "gate"),
-        "spatial_res_gate": ("Spatial gate + gate*DeltaH","spatial", True, "gate"),
+        "tf_only":      ("TF-only (fix_c=0)",         0.0),
+        "ephys_only":   ("E_phys-only (fix_c=1)",     1.0),
+        "fixed_blend":  (f"Fixed blend (lam={best_lam:.2f})", best_lam),
+        "learned_c":    ("Learned confidence (full)",  None),
     }
     ablation_results = {}
-    for key, (label, fm, res, coup) in ablation_specs.items():
+    for key, (label, c_val) in ablation_specs.items():
         nmses = []
         with torch.no_grad():
             for idx in range(test_sl.start, test_sl.stop):
@@ -355,13 +353,12 @@ def main() -> None:
                 target = sample["target"].unsqueeze(0).to(device)
                 pt = sample["path_tokens"].unsqueeze(0).to(device)
                 pv = sample["path_valid"].unsqueeze(0).to(device)
-                out, _ = model(tf_in, pt, pv, fusion_mode=fm, use_residual=res,
-                               residual_coupling=coup, fixed_lam=best_lam)
+                out, _ = model(tf_in, pt, pv, fix_c=c_val)
                 nmses.append(float(nmse_torch(out, target).cpu()))
         nmse_lin = float(np.mean(nmses))
         nmse_db = _nmse_db(nmse_lin)
         ablation_results[key] = {"label": label, "nmse_linear": nmse_lin, "nmse_db": nmse_db}
-        print(f"   {label:<30s} NMSE={nmse_db:+.2f} dB")
+        print(f"   {label:<35s} NMSE={nmse_db:+.2f} dB")
     results["gate_residual_ablation"] = ablation_results
 
     # ===================================================================
@@ -379,18 +376,14 @@ def main() -> None:
         ("Logistic quality gate", lqg_test["nmse_db"], "3 params", "Light"),
         ("Hold-out pilot select", ho_test["nmse_db"], "Pilot split", "No"),
         ("Soft hold-out blend", sho_test["nmse_db"], f"T={best_T:.4f}", "No"),
-        ("--- Factorial ablation ---", None, "", ""),
-        ("Fixed lam, no DeltaH", ablation_results["fixed_nores"]["nmse_db"],
+        ("--- Safe Fallback ablation ---", None, "", ""),
+        ("TF-only (fix_c=0)", ablation_results["tf_only"]["nmse_db"],
+         "c=0", "Structural"),
+        ("E_phys-only (fix_c=1)", ablation_results["ephys_only"]["nmse_db"],
+         "c=1", "Structural"),
+        ("Fixed blend", ablation_results["fixed_blend"]["nmse_db"],
          f"lam={best_lam:.2f}", "No"),
-        ("Spatial gate, no DeltaH", ablation_results["spatial_nores"]["nmse_db"],
-         "CNN gate", "Yes"),
-        ("Fixed lam + DeltaH", ablation_results["fixed_res"]["nmse_db"],
-         f"lam={best_lam:.2f}", "No"),
-        ("Spatial gate + DeltaH", ablation_results["spatial_res"]["nmse_db"],
-         "CNN gate", "Yes"),
-        ("Fixed lam + gate*DeltaH", ablation_results["fixed_res_gate"]["nmse_db"],
-         f"lam={best_lam:.2f}", "No"),
-        ("Spatial gate + gate*DeltaH", ablation_results["spatial_res_gate"]["nmse_db"],
+        ("Learned confidence c", ablation_results["learned_c"]["nmse_db"],
          "CNN gate", "Yes"),
         ("--- Full model ---", None, "", ""),
         ("**Spatial quality gate**", results["spatial_quality_gate_nmse_db"], "CNN gate", "Yes"),
