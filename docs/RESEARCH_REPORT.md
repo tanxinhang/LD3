@@ -640,6 +640,17 @@ in the presence of the differentiable DD position correction. TF auxiliary loss
 and token augmentation also cause instability with the Refiner. Bare NMSE
 training is the only stable configuration for the Refiner pipeline.
 
+### 5.13 Safe Fallback Architecture (2026-07-23)
+
+Output restructured for structural safety: H_out = H_TF + c * (E_phys - H_TF)
+where E_phys = H_phys + DeltaH. c=0 guarantees exact TF-only output (no
+learned approximation needed). c=1 uses full physics expert. Hard rule:
+all tokens invalid → c=0.
+
+Current NMSE: -10.40 dB (1 seed, bare NMSE). The +0.4 dB gap vs old gate
+(-10.79) is the cost of the structural guarantee. Gate supervision (BCE)
+removed -- incompatible with the differentiable Refiner pipeline.
+
 See `docs/GATE2_DESIGN.md` §11.8–11.12 for complete analysis.
 
 ---
@@ -698,6 +709,9 @@ Gate 2-D11  Reliability–Performance Pareto ............... MAPPED (v1/aggressi
 Gate 2-D12  OMP detector ................................ PASS (+2.28 dB over NMS)
 Gate 2-D13  DDTokenRefiner (Conv2d patch) ................ PASS (+0.91 dB over MLP)
 Gate 2-D14  Gate supervision + Refiner ................... FAIL (NaN, incompatible)
+Gate 2-D15  Safe fallback structure ...................... IMPLEMENTED (c=0 -> H_TF exact)
+Gate 2-D16  Gate supervision removed ..................... REMOVED (incompatible with Refiner)
+Gate 2-S1   Three-stage training ......................... AVAILABLE (not yet evaluated)
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```
