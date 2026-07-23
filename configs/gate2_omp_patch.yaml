@@ -58,13 +58,7 @@ training:
     weight: 0.0              # disabled — BCE unstable with Refiner
   loss_weights:
     final: 1.0
-    tf_aux: 0.1
+    tf_aux: 0.0
     physical_aux: 0.0
   token_augmentation:
-    enabled: true
-    clean_ratio: 0.80
-    batch_dropout_prob: 0.05
-    dropped_token_fraction: 0.3
-    phase_prob: 0.10
-    jitter_std: 0.10
-    coherent_false: 1
+    enabled: false
