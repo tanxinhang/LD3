@@ -647,9 +647,16 @@ where E_phys = H_phys + DeltaH. c=0 guarantees exact TF-only output (no
 learned approximation needed). c=1 uses full physics expert. Hard rule:
 all tokens invalid → c=0.
 
-Current NMSE: -10.40 dB (1 seed, bare NMSE). The +0.4 dB gap vs old gate
-(-10.79) is the cost of the structural guarantee. Gate supervision (BCE)
-removed -- incompatible with the differentiable Refiner pipeline.
+Current NMSE: -10.40 dB (1 seed, 100 epochs, bare NMSE). Direct comparison
+with -12.87 dB is invalid: the old result used the unconstrained gate formula
+(g.H_phys + (1-g).H_Tf + DeltaH) and was reached with obsolete 84-dim tokens.
+The proper baseline for the safe structure is a same-token, same-Refiner run
+using the unconstrained output formula -- this has NOT yet been done.
+Multi-seed evaluation and controlled ablation are required before interpreting
+the -0.4 or -2.5 dB gap as the structural safety cost.
+
+Gate supervision (BCE) retired -- structurally incompatible with the
+differentiable Refiner and no longer needed for all-invalid fallback.
 
 See `docs/GATE2_DESIGN.md` §11.8–11.12 for complete analysis.
 
@@ -709,9 +716,12 @@ Gate 2-D11  Reliability–Performance Pareto ............... MAPPED (v1/aggressi
 Gate 2-D12  OMP detector ................................ PASS (+2.28 dB over NMS)
 Gate 2-D13  DDTokenRefiner (Conv2d patch) ................ PASS (+0.91 dB over MLP)
 Gate 2-D14  Gate supervision + Refiner ................... FAIL (NaN, incompatible)
-Gate 2-D15  Safe fallback structure ...................... IMPLEMENTED (c=0 -> H_TF exact)
-Gate 2-D16  Gate supervision removed ..................... REMOVED (incompatible with Refiner)
-Gate 2-S1   Three-stage training ......................... AVAILABLE (not yet evaluated)
+Gate 2-D15a Safe fallback formulation .................... IMPLEMENTED (c=0 -> H_TF exact)
+Gate 2-D15b all-invalid exact fallback unit test ......... OPEN
+Gate 2-D15c clean-performance multi-seed (3-5 seeds) ..... OPEN
+Gate 2-D15d corruption audit on final pipeline ........... OPEN
+Gate 2-D16  Direct gate supervision with Refiner .......... RETIRED (NaN; not needed)
+Gate 2-S1   Frozen-expert three-stage training ............ OPEN
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```
