@@ -585,7 +585,62 @@ P0 optimized:    Clean −10.79  ✓   |  Gate 415×       ✓  |  Harm ~62%
 Spatial gate is always harmful alone; residual contributes 78-82% of total
 gain; marginal spatial gain is 18-22%.
 
-See `docs/GATE2_DESIGN.md` §11.8–11.9 for complete analysis.
+### 5.9 OMP Detector: +2.28 dB from Detection Alone
+
+| Detector | DD+LS NMSE |
+|----------|:---:|
+| NMS | −8.36 dB |
+| **OMP** | **−10.64 dB** |
+| Improvement | **+2.28 dB** |
+
+OMP replaces NMS peak-picking with residual-driven orthogonal matching pursuit
+on the same DD dictionary. No VP needed — OMP alone exceeds NMS+VP+LS. Each
+OMP iteration selects the column with maximum residual projection, then updates
+residual via ridge LS. This is immune to the over-sampling dilemma that degrades
+NMS at finer grids.
+
+### 5.10 Token Architecture Evolution
+
+| Token Version | Dims | Content | DD+LS Baseline |
+|:---|:---:|---|:---:|
+| v1 (legacy) | 7 | τ, ν, power, conf, στ, σν, rel | −8.36 |
+| v2 (current) | 9 | v1 + Re(α), Im(α) | −8.36 |
+| v3 (patch) | 18 | v2 + 3×3 score_map patch | −10.64 (with OMP) |
+
+### 5.11 DDTokenRefiner: Learned Position Correction
+
+Two architectures compared:
+
+| Refiner | Input | Params | NMSE |
+|---------|:---:|:---:|:---:|
+| None (OMP only) | — | 0 | −10.64 |
+| MLP(9d→16→16→2) | 9 scalar | 470 | −11.96 |
+| **Conv2d(3×3)+MLP** | 9 scalar + 9 patch | ~500 | **−12.87** |
+
+The Conv2d branch learns gradient, curvature, and asymmetry operators from the
+3×3 score_map patch — directly measuring the Δτ,Δν correction — while the MLP
+branch provides physical context from scalar features. The hybrid architecture
+converges faster (epoch 4 val=0.098 vs MLP's 0.120) and achieves +0.91 dB over
+MLP-only.
+
+### 5.12 Complete Results Ladder
+
+| Method | NMSE (dB) | Gain | Date |
+|--------|:---:|:---:|---|
+| NMS+LS | −8.36 | baseline | 7/17 |
+| NMS+VP+model | −11.31 | +2.95 | 7/21 |
+| OMP+LS | −10.64 | — | 7/22 |
+| OMP+MLP Refiner+model | −11.96 | +1.32 over OMP | 7/22 |
+| **OMP+Conv2d Refiner+model** | **−12.87** | **+2.23 over OMP** | 7/22 |
+| Oracle+LS (upper bound) | −24.29 | +11.42 remaining | — |
+
+**Gate supervision (BCE) is incompatible with the Refiner** — produces NaN
+at epoch 4-6 even at weight=0.01. The mask-normalized BCE amplifies gradients
+in the presence of the differentiable DD position correction. TF auxiliary loss
+and token augmentation also cause instability with the Refiner. Bare NMSE
+training is the only stable configuration for the Refiner pipeline.
+
+See `docs/GATE2_DESIGN.md` §11.8–11.12 for complete analysis.
 
 ---
 
@@ -640,6 +695,9 @@ Gate 2-D8   Gate supervision + matched aug .............. BREAKTHROUGH (harm 99%
 Gate 2-D9   Cross-run 2×2 consensus (3 runs) ............ PASS (robust)
 Gate 2-D10  P0: Normalized target + margin + clean ratio . PASS (Clean -10.79, gate 415×)
 Gate 2-D11  Reliability–Performance Pareto ............... MAPPED (v1/aggressive/P0)
+Gate 2-D12  OMP detector ................................ PASS (+2.28 dB over NMS)
+Gate 2-D13  DDTokenRefiner (Conv2d patch) ................ PASS (+0.91 dB over MLP)
+Gate 2-D14  Gate supervision + Refiner ................... FAIL (NaN, incompatible)
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```
