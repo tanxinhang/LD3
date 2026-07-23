@@ -215,7 +215,16 @@ def main() -> None:
         zero_init_residual=bool(training_cfg.get("zero_init_residual", True)),
     ).to(device)
     model_pt = args.model_dir / "physics_residual_seed0.pt"
-    model.load_state_dict(torch.load(model_pt, map_location=device, weights_only=True))
+    ckpt = torch.load(model_pt, map_location=device, weights_only=True)
+    # Infer gate_kernel_size from checkpoint shape: gate.0.weight [C_out, C_in, kH, kW]
+    gate_kw = ckpt["gate.0.weight"].shape[-1]  # actual kernel size from saved model
+    model.gate = torch.nn.Sequential(
+        torch.nn.Conv2d(model.gate[0].in_channels, model.gate[0].out_channels, gate_kw, padding=gate_kw // 2),
+        torch.nn.GELU(),
+        torch.nn.Conv2d(model.gate[2].in_channels, model.gate[2].out_channels, gate_kw, padding=gate_kw // 2),
+        torch.nn.Sigmoid(),
+    )
+    model.load_state_dict(ckpt, strict=False)  # strict=False for missing token_refiner keys
     model.eval()
 
     tf_model = TFOnlyEstimator(hidden_dim=hidden_dim).to(device)
