@@ -574,7 +574,7 @@ class PhysicalResidualEstimator(nn.Module):
         # 4. Physics residual correction → Physics expert
         E_phys = H_phys  # fallback if residual disabled
         if use_residual:
-            residual_input = torch.cat([tf_features, H_phys], dim=1)
+            residual_input = torch.cat([tf_features, H_phys, H_tf], dim=1)
             delta = self.residual(residual_input)          # [B, 2, N, M]
             if fusion_mode == "fixed":
                 E_phys = H_phys + fixed_lam * delta  # scale residual like blend

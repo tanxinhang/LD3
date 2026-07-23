@@ -803,17 +803,18 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             torch.save(model.state_dict(), output_dir / f"{name}_seed{seed_idx}.pt")
             print(f"  {name}: test NMSE={metrics['nmse_db']:.3f} dB")
 
-        # Per-seed diagnostic gains
-        cross_nmse_db = seed_results["physics_cross_attention"]["test"]["nmse_db"]
-        tf_nmse_db = seed_results["tf_only"]["test"]["nmse_db"]
-        seed_results["oracle_cross_attention_gain_db"] = float(tf_nmse_db - cross_nmse_db)
-        cross_evals = seed_results["physics_cross_attention"]["evaluations"]
-        seed_results["oracle_vs_shuffled_gain_db"] = float(
-            cross_evals["shuffled"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
-        )
-        seed_results["oracle_vs_null_gain_db"] = float(
-            cross_evals["null"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
-        )
+        # Per-seed diagnostic gains (only if all models were trained)
+        if "physics_cross_attention" in seed_results and "tf_only" in seed_results:
+            cross_nmse_db = seed_results["physics_cross_attention"]["test"]["nmse_db"]
+            tf_nmse_db = seed_results["tf_only"]["test"]["nmse_db"]
+            seed_results["oracle_cross_attention_gain_db"] = float(tf_nmse_db - cross_nmse_db)
+            cross_evals = seed_results["physics_cross_attention"]["evaluations"]
+            seed_results["oracle_vs_shuffled_gain_db"] = float(
+                cross_evals["shuffled"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
+            )
+            seed_results["oracle_vs_null_gain_db"] = float(
+                cross_evals["null"]["nmse_db"] - cross_evals["oracle"]["nmse_db"]
+            )
         all_results["seeds"][f"seed_{run_seed}"] = seed_results
 
     # --- Hierarchical bootstrap across seeds (paired resampling) ---
