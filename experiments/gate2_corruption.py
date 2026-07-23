@@ -143,7 +143,7 @@ def evaluate_corrupted(
     # Per-sample accumulators
     fusion_nmse: list[float] = []
     tf_only_nmse: list[float] = []
-    gate_mean_vals: list[float] = []
+    confidence_mean_vals: list[float] = []
     gate_p10_vals: list[float] = []
     gate_p50_vals: list[float] = []
     gate_p90_vals: list[float] = []
@@ -218,9 +218,9 @@ def evaluate_corrupted(
         fusion_nmse.append(nmse_val)
 
         # Gate statistics (per-pixel gate, flattened)
-        if "gate" in diagnostics:
-            gate_map = diagnostics["gate"].cpu().numpy().ravel()  # [B*1*N*M]
-            gate_mean_vals.append(float(np.mean(gate_map)))
+        if "confidence" in diagnostics:
+            gate_map = diagnostics["confidence"].cpu().numpy().ravel()  # [B*1*N*M]
+            confidence_mean_vals.append(float(np.mean(gate_map)))
             gate_p10_vals.append(float(np.percentile(gate_map, 10)))
             gate_p50_vals.append(float(np.percentile(gate_map, 50)))
             gate_p90_vals.append(float(np.percentile(gate_map, 90)))
@@ -234,7 +234,7 @@ def evaluate_corrupted(
             decomp_phys_mix.append(float(diagnostics["phys_mix_mean"].cpu()))
 
         # H_phys NMSE
-        if "gate" in diagnostics:
+        if "confidence" in diagnostics:
             # H_phys is NOT directly returned; we synthesize it
             from ld3.channel import PathSet
             # Use corrupted token positions and gains (only valid ones)
@@ -282,13 +282,13 @@ def evaluate_corrupted(
         r_sorted = np.sort(R)
         result["auc_degradation"] = float(np.trapezoid(r_sorted) / len(r_sorted))
 
-    if gate_mean_vals:
-        gm = np.array(gate_mean_vals)
-        result["gate_mean"] = float(np.mean(gm))
+    if confidence_mean_vals:
+        gm = np.array(confidence_mean_vals)
+        result["confidence_mean"] = float(np.mean(gm))
         result["gate_p10"] = float(np.percentile(gm, 10))
         result["gate_p50"] = float(np.percentile(gm, 50))
         result["gate_p90"] = float(np.percentile(gm, 90))
-        # Correlation: gate_mean vs -NMSE_H_phys
+        # Correlation: confidence_mean vs -NMSE_H_phys
         if h_phys_nmse:
             hp = np.array(h_phys_nmse)
             neg_hp_nmse = -10.0 * np.log10(np.clip(hp, 1e-30, None))
@@ -339,8 +339,8 @@ def run_corruption_sweep(
         print(f"NMSE={result['nmse_db']:+.2f} dB", end="")
         if "harm_rate" in result:
             print(f", harm_rate={result['harm_rate']:.3f}", end="")
-        if "gate_mean" in result:
-            print(f", gate={result['gate_mean']:.3f}", end="")
+        if "confidence_mean" in result:
+            print(f", gate={result['confidence_mean']:.3f}", end="")
         print()
     return results
 
@@ -509,7 +509,7 @@ def main() -> None:
         chain = r["token_source"][:9]
         nmse = f"{r['nmse_db']:+.2f}"
         harm = f"{r.get('harm_rate', float('nan'))*100:.1f}%" if 'harm_rate' in r else "N/A"
-        gate = f"{r['gate_mean']:.3f}" if 'gate_mean' in r else "N/A"
+        gate = f"{r['confidence_mean']:.3f}" if 'confidence_mean' in r else "N/A"
         r_mean = f"{r.get('mean_regret_R', float('nan')):+.4f}" if 'mean_regret_R' in r else "N/A"
         print(f"{name:<35s} {chain:<10s} {nmse:>8s} {harm:>7s} {gate:>7s} {r_mean:>8s}")
 
