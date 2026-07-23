@@ -150,8 +150,12 @@ class SyntheticOFDMISACDataset(Dataset):
                     attach_patch=self.cfg.token_version >= 3,
                 )
             else:
-                # No paths detected — empty tokens
-                dim = 18 if self.cfg.token_version >= 3 else (9 if self.cfg.token_version >= 2 else 7)
+                # No paths detected — empty tokens, no Oracle leak
+                if self.cfg.token_version >= 3:
+                    patch_size = (2 * 2 + 1) ** 2  # R=2 → 25
+                    dim = 9 + patch_size + 2 * patch_size  # 84
+                else:
+                    dim = 18 if self.cfg.token_version >= 3 else (9 if self.cfg.token_version >= 2 else 7)
                 tokens = np.zeros((self.cfg.max_paths, dim), dtype=np.float32)
                 valid = np.zeros(self.cfg.max_paths, dtype=bool)
         elif self.cfg.token_version >= 2:

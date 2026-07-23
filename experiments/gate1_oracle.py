@@ -16,9 +16,6 @@ Design rules:
 
 from __future__ import annotations
 
-import os
-os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
 import argparse
 from dataclasses import replace
 import json
@@ -44,7 +41,6 @@ from ld3.dataset import DatasetConfig, SyntheticOFDMISACDataset
 from ld3.dd_estimation import (
     build_dd_grid,
     detect_paths_nms,
-    detect_paths_omp,
     masked_matched_filter_map,
 )
 from ld3.metrics import nmse_loss, nmse_numpy, nmse_torch
@@ -113,7 +109,6 @@ def _evaluate_non_learned_with_samples(
     nmse_perfect_vals: list[float] = []
     nmse_oracle_support_ls_vals: list[float] = []
     nmse_estimated_support_ls_vals: list[float] = []
-    nmse_omp_support_ls_vals: list[float] = []
     nmse_initial_vals: list[float] = []
 
     for idx in range(cfg.size):
@@ -161,19 +156,6 @@ def _evaluate_non_learned_with_samples(
         )
         nmse_estimated_support_ls_vals.append(nmse_numpy(H_dd_ls, truth))
 
-        # Gate 1-C v2: OMP-estimated support + LS
-        est_paths_omp = detect_paths_omp(
-            score_map, gain_map, grid,
-            num_paths=channel.num_paths,
-            pilot_observations=observed, pilot_mask=mask,
-            num_subcarriers=ofdm.num_subcarriers,
-            num_symbols=ofdm.num_symbols,
-        )
-        H_omp_ls = estimated_support_ls_reconstruction(
-            ofdm, est_paths_omp, observed, mask
-        )
-        nmse_omp_support_ls_vals.append(nmse_numpy(H_omp_ls, truth))
-
     def stats(vals: list[float]) -> dict[str, float]:
         arr = np.array(vals)
         return {
@@ -187,14 +169,12 @@ def _evaluate_non_learned_with_samples(
         "nmse_oracle_perfect": np.array(nmse_perfect_vals),
         "nmse_oracle_support_ls": np.array(nmse_oracle_support_ls_vals),
         "nmse_estimated_support_ls": np.array(nmse_estimated_support_ls_vals),
-        "nmse_omp_support_ls": np.array(nmse_omp_support_ls_vals),
         "nmse_initial_interpolation": np.array(nmse_initial_vals),
     }
     summary = {
         "nmse_oracle_perfect": stats(nmse_perfect_vals),
         "nmse_oracle_support_ls": stats(nmse_oracle_support_ls_vals),
         "nmse_estimated_support_ls": stats(nmse_estimated_support_ls_vals),
-        "nmse_omp_support_ls": stats(nmse_omp_support_ls_vals),
         "nmse_initial_interpolation": stats(nmse_initial_vals),
     }
     return summary, per_sample
@@ -288,36 +268,24 @@ def train_model(
     gate_sup_weight: float = 0.0,
     gate_sup_temperature: float = 0.1,
     gate_sup_margin: float = 0.0,
-    residual_warmup_epochs: int = 0,
 ) -> tuple[list[dict[str, float]], torch.nn.Module]:
     """Train with optional validation-based best-checkpoint selection.
 
-    When residual_warmup_epochs > 0 and model_type == "physical_residual":
-      - First residual_warmup_epochs: residual head FROZEN, train only gate+TF
-      - After warmup: unfreeze residual, joint training
-      This prevents the zero-init residual from dominating early training.
+    Returns (history, best_model_state_dict).  If val_loader is None, the
+    final model state is returned as "best".
+
+    model_type: "none" | "legacy_cross" | "physical_residual"
+      - physical_residual adds a gate bias loss to encourage trusting H_phys
     """
     model.to(device)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay
     )
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=epochs, eta_min=learning_rate * 0.01
-    )
     history: list[dict[str, float]] = []
     best_val_nmse = float("inf")
     best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
 
-    # Phase training: freeze residual head during warmup
-    if residual_warmup_epochs > 0 and model_type == "physical_residual":
-        model.freeze_residual()
-        print(f"  Residual frozen for {residual_warmup_epochs} epochs (gate-only warmup)")
-
     for epoch in range(1, epochs + 1):
-        if residual_warmup_epochs > 0 and epoch == residual_warmup_epochs + 1 \
-                and model_type == "physical_residual":
-            model.unfreeze_residual()
-            print(f"  Residual unfrozen at epoch {epoch} (joint training)")
         model.train()
         losses: list[float] = []
         for batch in loader:
@@ -408,9 +376,6 @@ def train_model(
                                 pt[b, fi, 7] = pt[b, anchor_idx, 7] * 0.4
                                 pt[b, fi, 8] = pt[b, anchor_idx, 8] * 0.4
                                 pv[b, fi] = True
-                                # Zero patch fields for fake tokens (dims 9+) — no DD evidence
-                                if pt.shape[2] > 9:
-                                    pt[b, fi, 9:] = 0.0
 
                     # Restore clean samples (not selected for augmentation)
                     if aug_clean_ratio > 0:
@@ -452,7 +417,8 @@ def train_model(
                 # Margin mask: only supervise where experts clearly differ
                 margin = advantage.abs()
                 mask = (margin > gate_sup_margin).to(g_map.dtype)  # [B, 1, N, M]
-                # No normalisation: loss weight already scales the contribution
+                mask_weight = mask.sum() / mask.numel() if mask.sum() > 0 else 1.0
+                mask = mask / mask_weight.clamp_min(0.01)  # normalise to maintain loss scale
 
                 # BCE with margin-masked supervision
                 g_safe = g_map.clamp(1e-7, 1.0 - 1e-7)
@@ -490,7 +456,6 @@ def train_model(
                 row["best"] = True
 
         history.append(row)
-        scheduler.step()
         parts = [f"epoch={epoch:03d} train_nmse={row['train_nmse']:.6f}"]
         if val_loader is not None:
             parts.append(f"val_nmse={row.get('val_nmse', float('nan')):.6f}")
@@ -601,10 +566,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     token_ref = str(data_cfg.get("token_refine", ""))
     token_vp_r = int(data_cfg.get("token_vp_rounds", 3))
     token_vp_p = int(data_cfg.get("token_vp_probes", 8))
-    token_vp_fast = bool(data_cfg.get("token_vp_fast", False))
-    dd_os_delay = int(data_cfg.get("dd_oversample_delay", 2))
-    dd_os_doppler = int(data_cfg.get("dd_oversample_doppler", 4))
-    detector_method = str(data_cfg.get("detector_method", "nms"))
     test_cfg_fixed = DatasetConfig(
         size=int(data_cfg["test_size"]),
         snr_min_db=float(data_cfg["snr_min_db"]),
@@ -618,10 +579,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         token_refine=token_ref,
         token_vp_rounds=token_vp_r,
         token_vp_probes=token_vp_p,
-        token_vp_fast=token_vp_fast,
-        dd_oversample_delay=dd_os_delay,
-        dd_oversample_doppler=dd_os_doppler,
-        detector_method=detector_method,
     )
     # Fixed validation bank for best-checkpoint selection
     val_size = int(data_cfg.get("val_size", max(256, int(data_cfg["train_size"]) // 4)))
@@ -654,7 +611,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     hidden_dim = int(training["hidden_dim"])
     use_quality_gate = bool(training.get("use_quality_gate", False))
     use_path_stats = bool(training.get("use_path_stats", False))
-    gate_kernel_size = int(training.get("gate_kernel_size", 1))
     aug_cfg = training.get("token_augmentation", {})
     aug_enabled = bool(aug_cfg.get("enabled", False))
     aug_batch_dropout_prob = float(aug_cfg.get("batch_dropout_prob", 0.0))
@@ -670,9 +626,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     gate_sup_weight = float(training.get("gate_supervision", {}).get("weight", 0.0))
     gate_sup_temperature = float(training.get("gate_supervision", {}).get("temperature", 0.1))
     gate_sup_margin = float(training.get("gate_supervision", {}).get("margin", 0.0))
-    residual_warmup = int(training.get("residual_warmup_epochs", 0))
-    zero_init_residual = bool(training.get("zero_init_residual", True))
-    use_token_refiner = bool(training.get("use_token_refiner", False))
 
     # --- Per-seed learned model NMSE records (keyed by model NAME, not type) ---
     per_seed_nmse: dict[str, list[np.ndarray]] = {}
@@ -723,7 +676,8 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
 
         token_ver = int(data_cfg.get("token_version", 1))
         if token_ver >= 3:
-            token_dim_in = 18  # 9 scalar + 9 patch (3x3 score_map)
+            patch_size = (2 * 2 + 1) ** 2  # R=2 → 25
+            token_dim_in = 9 + patch_size + 2 * patch_size  # 9 + 25 + 50 = 84
         else:
             token_dim_in = 5 + 2 * token_ver  # v1→7 dims, v2→9 dims
         # Model group: "tf_baseline" | "dd_attention" | "physical_residual"
@@ -754,9 +708,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                     num_symbols=ofdm.num_symbols,
                     use_quality_gate=use_quality_gate,
                     use_path_stats=use_path_stats,
-                    gate_kernel_size=gate_kernel_size,
-                    zero_init_residual=zero_init_residual,
-                    use_token_refiner=use_token_refiner,
                 ),
                 "physical_residual", "physical_residual",
             ),
@@ -797,7 +748,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 gate_sup_weight=gate_sup_weight,
                 gate_sup_temperature=gate_sup_temperature,
                 gate_sup_margin=gate_sup_margin,
-                residual_warmup_epochs=residual_warmup,
             )
             # Load best-validation checkpoint before final evaluation
             model.load_state_dict(best_state)
@@ -1094,8 +1044,6 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
     print(f"  Gate 1-A (Oracle perfect):       NMSE={nmse_perfect:+.3f} dB")
     print(f"  Gate 1-B (Oracle support + LS):  NMSE={nmse_oracle_ls:+.3f} dB")
     print(f"  Gate 1-C (Estimated support + LS): NMSE={nmse_est_ls:+.3f} dB")
-    nmse_omp_ls = non_learned_test["nmse_omp_support_ls"]["nmse_db"]
-    print(f"  Gate 1-C (OMP support + LS):       NMSE={nmse_omp_ls:+.3f} dB")
     print(f"  Initial interpolation:           NMSE={nmse_initial:+.3f} dB")
     print(f"  Δ_gain   = Oracle+LS - Perfect  = {nmse_oracle_ls - nmse_perfect:+.3f} dB")
     print(f"  Δ_support = Est+LS - Oracle+LS  = {nmse_est_ls - nmse_oracle_ls:+.3f} dB")
