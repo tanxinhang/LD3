@@ -556,7 +556,8 @@ class PhysicalResidualEstimator(nn.Module):
         # --- Ablation controls (decoupled switches) ---
         fusion_mode: str = "spatial",  # "spatial" | "fixed"
         fixed_lam: float = 0.80,       # λ for fixed fusion
-        use_residual: bool = True,     # enable/disable ΔH
+        use_residual: bool = True,
+        fix_c: float | None = None,    # canonical ablation: force c to constant value
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch, _, N, M = tf_input.shape
 
@@ -584,20 +585,24 @@ class PhysicalResidualEstimator(nn.Module):
             delta = torch.zeros_like(H_phys)
 
         # 5. Confidence gate c ∈ [0,1]: how much to trust Physics expert over TF
-        gate_parts = [tf_features, H_phys, H_tf]
-        if self.use_quality_gate:
-            quality_map = _build_quality_map(H_phys, H_tf, path_tokens, path_valid)
-            gate_parts.append(quality_map)
-        if self.use_path_stats:
-            path_stats = _build_path_stats(path_tokens, path_valid, N, M)
-            gate_parts.append(path_stats)
-        gate_input = torch.cat(gate_parts, dim=1)
-        c_raw = self.gate(gate_input)                     # [B, 1, N, M]
+        has_any_valid = path_valid.any(dim=1).to(tf_input.dtype)  # [B]
+        has_any_valid = has_any_valid[:, None, None, None]          # [B, 1, 1, 1]
 
-        # Hard null-fallback: ALL tokens invalid → c=0 → Ĥ = H_tf (guaranteed)
-        has_any_valid = path_valid.any(dim=1).to(c_raw.dtype)       # [B]
-        has_any_valid = has_any_valid[:, None, None, None]           # [B, 1, 1, 1]
-        c = has_any_valid * c_raw                                    # [B, 1, N, M]
+        if fix_c is not None:
+            # Canonical ablation: constant confidence for H_phys-only / E_phys-only
+            c = has_any_valid * fix_c
+        else:
+            gate_parts = [tf_features, H_phys, H_tf]
+            if self.use_quality_gate:
+                quality_map = _build_quality_map(H_phys, H_tf, path_tokens, path_valid)
+                gate_parts.append(quality_map)
+            if self.use_path_stats:
+                path_stats = _build_path_stats(path_tokens, path_valid, N, M)
+                gate_parts.append(path_stats)
+            gate_input = torch.cat(gate_parts, dim=1)
+            c_raw = self.gate(gate_input)
+            # Hard null-fallback: ALL tokens invalid → c=0
+            c = has_any_valid * c_raw
 
         # 6. Safe fallback output:
         #    c=0 → Ĥ = H_tf          (TF only, structural guarantee)

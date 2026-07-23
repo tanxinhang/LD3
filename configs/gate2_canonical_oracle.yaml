@@ -1,0 +1,51 @@
+# Canonical Experiment: Oracle tokens (true tau, nu, alpha)
+# Same architecture as gate2_safe, but token_source: oracle
+# Answers: if DD detection were perfect, how close to -24.29 dB?
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_canonical_oracle.yaml \
+#     --output-dir results/gate2_canonical_oracle --device cuda --models physics_residual
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2              # Oracle tokens are 9-dim
+  token_source: oracle          # True tau, nu, alpha from channel simulator
+
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 1
+  use_quality_gate: true
+  use_path_stats: true
+  use_token_refiner: false      # No Refiner needed for oracle tokens
+  gate_kernel_size: 3
