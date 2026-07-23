@@ -539,7 +539,7 @@ class PhysicalResidualEstimator(nn.Module):
 
         # Residual correction — zero-init so training starts at H_phys.
         self.residual = nn.Sequential(
-            nn.Conv2d(hidden_dim + 2, hidden_dim, 3, padding=1),
+            nn.Conv2d(hidden_dim + 4, hidden_dim, 3, padding=1),
             nn.GELU(),
             nn.Conv2d(hidden_dim, 2, 1),
         )
