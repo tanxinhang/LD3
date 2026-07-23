@@ -55,12 +55,10 @@ training:
   gate_kernel_size: 3
   # Re-enable gate supervision + TF aux + aug (conservative weights)
   gate_supervision:
-    weight: 0.01
-    temperature: 0.1
-    margin: 0.1
+    weight: 0.0              # OFF
   loss_weights:
     final: 1.0
-    tf_aux: 0.1
+    tf_aux: 0.0              # OFF
     physical_aux: 0.0
   token_augmentation:
     enabled: true
