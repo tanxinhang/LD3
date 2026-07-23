@@ -66,6 +66,7 @@ def extract_components(
     device: torch.device,
     ofdm: OFDMConfig,
     channel: ChannelConfig,
+    fix_c: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Run frozen model on dataset, return all component arrays for baselines.
 
@@ -100,7 +101,7 @@ def extract_components(
 
             # Model forward with components
             output, diag = model(tf_input, pt, pv, return_components=True,
-                                fix_c=args.fix_c)
+                                fix_c=fix_c)
             H_phys_t = diag["H_phys"]  # [1, 2, N_sc, N_sym]
             H_tf_t = diag["H_tf"]      # [1, 2, N_sc, N_sym]
 
@@ -237,7 +238,8 @@ def main() -> None:
 
     # --- Extract components ---
     print(f"Extracting components from {args.samples} samples...")
-    comps = extract_components(model, tf_model, test_dataset, device, ofdm, channel)
+    comps = extract_components(model, tf_model, test_dataset, device, ofdm, channel,
+                              fix_c=args.fix_c)
     H_true, H_phys, H_tf, H_out = comps["H_true"], comps["H_phys"], comps["H_tf"], comps["H_out"]
     tokens, valid = comps["tokens"], comps["valid"]
     obs, mask = comps["pilot_observations"], comps["pilot_mask"]
