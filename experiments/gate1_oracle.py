@@ -720,8 +720,11 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
             if name not in per_seed_gate:
                 per_seed_gate[name] = []
 
+        model_filter: list[str] | None = config.get("model_filter")
         seed_results: dict[str, Any] = {}
         for name, (model, model_type, model_group) in models.items():
+            if model_filter and name not in model_filter:
+                continue
             uses_tokens = model_type in ("legacy_cross", "physical_residual")
             is_physical = model_type == "physical_residual"
             print(f"\nTraining {name} on {device}")
@@ -1082,6 +1085,8 @@ def main() -> None:
     parser.add_argument("--test-size", type=int, default=None)
     parser.add_argument("--num-seeds", type=int, default=None)
     parser.add_argument("--device", type=str, default=None, help="Force device (cpu/cuda)")
+    parser.add_argument("--models", type=str, default=None,
+                        help="Comma-separated model filter (e.g. 'physics_residual')")
     args = parser.parse_args()
     config = load_config(args.config)
     if args.device is not None:
@@ -1094,6 +1099,8 @@ def main() -> None:
         config["dataset"]["test_size"] = args.test_size
     if args.num_seeds is not None:
         config["training"]["num_seeds"] = args.num_seeds
+    if args.models is not None:
+        config["model_filter"] = [m.strip() for m in args.models.split(",")]
     run(config, args.output_dir)
 
 
