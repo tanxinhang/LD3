@@ -979,7 +979,10 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         },
         "gate_1D0_legacy_cross_attention": {
             "status": "PRELIM_PASS" if any(
-                s["oracle_cross_attention_gain_db"] > 0.5
+                s.get("oracle_cross_attention_gain_db", 0) > 0.5
+                for s in all_results["seeds"].values()
+            ) else "SKIPPED" if not any(
+                "oracle_cross_attention_gain_db" in s
                 for s in all_results["seeds"].values()
             ) else "FAIL",
             "note": "Legacy softmax cross-attention. Token-use audit confirms DD prior "
