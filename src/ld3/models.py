@@ -446,9 +446,22 @@ class DDTokenRefiner(nn.Module):
         # Branch B: scalar features from first 9 dims
         scalar_feat = self.scalar_encoder(tokens[:, :, :9])
 
-        if self.has_patch:
+        if self.has_patch and tokens.shape[2] >= 18:
             # Branch A: geometric features from 3×3 patch (dims 9-17)
             patch = tokens[:, :, 9:18].reshape(B * L, 1, 3, 3)
+        elif self.has_patch:
+            # Token dim < 18 → no patch → zero geometric features
+            geo_feat = torch.zeros(B, L, 8, device=tokens.device, dtype=tokens.dtype)
+            fused = torch.cat([geo_feat, scalar_feat], dim=-1)
+            delta = self.decoder(fused)
+            delta = torch.tanh(delta) * self.max_correction
+            refined = tokens.clone()
+            valid_f = valid.to(tokens.dtype).unsqueeze(-1)
+            refined[:, :, 0] += delta[:, :, 0] * valid_f.squeeze(-1)
+            refined[:, :, 1] += delta[:, :, 1] * valid_f.squeeze(-1)
+            refined[:, :, 0].clamp_(0.0, 12.0)
+            refined[:, :, 1].clamp_(-3.0, 3.0)
+            return refined
             geo_feat = self.patch_encoder(patch).view(B, L, -1)  # [B, L, 8]
             fused = torch.cat([geo_feat, scalar_feat], dim=-1)
         else:
