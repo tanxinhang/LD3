@@ -53,3 +53,20 @@ training:
   use_path_stats: true
   use_token_refiner: true
   gate_kernel_size: 3
+  # Re-enable gate supervision + TF aux + aug (conservative weights)
+  gate_supervision:
+    weight: 0.01
+    temperature: 0.1
+    margin: 0.1
+  loss_weights:
+    final: 1.0
+    tf_aux: 0.1
+    physical_aux: 0.0
+  token_augmentation:
+    enabled: true
+    clean_ratio: 0.80
+    batch_dropout_prob: 0.05
+    dropped_token_fraction: 0.3
+    phase_prob: 0.10
+    jitter_std: 0.10
+    coherent_false: 1
