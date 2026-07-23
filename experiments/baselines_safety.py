@@ -99,7 +99,8 @@ def extract_components(
             pv = sample["path_valid"].unsqueeze(0).to(device)
 
             # Model forward with components
-            output, diag = model(tf_input, pt, pv, return_components=True)
+            output, diag = model(tf_input, pt, pv, return_components=True,
+                                fix_c=args.fix_c)
             H_phys_t = diag["H_phys"]  # [1, 2, N_sc, N_sym]
             H_tf_t = diag["H_tf"]      # [1, 2, N_sc, N_sym]
 
@@ -169,6 +170,8 @@ def main() -> None:
     parser.add_argument("--val-frac", type=float, default=0.3,
                         help="Fraction of samples for validation (blend/switch optimisation)")
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--fix-c", type=float, default=None,
+                        help="Force confidence c to constant (0=TF-only, 1=E_phys)")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -204,7 +207,12 @@ def main() -> None:
     # --- Load models ---
     model = PhysicalResidualEstimator(
         hidden_dim=hidden_dim, num_subcarriers=ofdm.num_subcarriers,
-        num_symbols=ofdm.num_symbols, use_quality_gate=use_quality_gate,
+        num_symbols=ofdm.num_symbols,
+        use_quality_gate=use_quality_gate,
+        use_path_stats=bool(training_cfg.get("use_path_stats", False)),
+        gate_kernel_size=int(training_cfg.get("gate_kernel_size", 1)),
+        use_token_refiner=bool(training_cfg.get("use_token_refiner", False)),
+        zero_init_residual=bool(training_cfg.get("zero_init_residual", True)),
     ).to(device)
     model_pt = args.model_dir / "physics_residual_seed0.pt"
     model.load_state_dict(torch.load(model_pt, map_location=device, weights_only=True))
