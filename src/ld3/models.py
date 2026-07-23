@@ -411,30 +411,57 @@ def _build_path_stats(
 class DDTokenRefiner(nn.Module):
     """Learned DD fractional position correction — replaces VP as differentiable layer.
 
-    Given coarse (τ, ν) from OMP/NMS, predicts bounded Δτ, Δν per path.
-    PhysicalReconstructor is differentiable, so NMSE gradient flows back to refiner.
+    Hybrid architecture:
+      Branch A (Conv2d): 3×3 score_map patch → geometric features (gradient, curvature)
+      Branch B (MLP):    9-dim scalar token → physical features (τ,ν,α,conf,…)
+      Fusion: concat → MLP → Δτ, Δν
     """
-    def __init__(self, token_dim: int = 9, hidden: int = 16):
+    def __init__(self, token_dim: int = 18, hidden: int = 16):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(token_dim, hidden), nn.GELU(),
-            nn.Linear(hidden, hidden), nn.GELU(),
+        self.has_patch = token_dim >= 18
+        # Branch A: patch encoder (3×3 → 8-dim geometric features)
+        if self.has_patch:
+            self.patch_encoder = nn.Sequential(
+                nn.Conv2d(1, 4, 3, padding=1), nn.GELU(),
+                nn.Flatten(),
+                nn.Linear(4 * 3 * 3, 8),
+            )
+        # Branch B: scalar encoder (9 → 8-dim)
+        scalar_in = min(token_dim, 9)  # first 9 dims are scalars
+        self.scalar_encoder = nn.Sequential(
+            nn.Linear(scalar_in, 8), nn.GELU(),
+        )
+        # Fusion + Decoder
+        fusion_in = 16 if self.has_patch else 8
+        self.decoder = nn.Sequential(
+            nn.Linear(fusion_in, hidden), nn.GELU(),
             nn.Linear(hidden, 2),  # Δτ, Δν
         )
-        self.max_correction = 0.5  # ±0.5 bin (sub-grid range)
+        self.max_correction = 0.5
 
     def forward(self, tokens: torch.Tensor, valid: torch.Tensor
                 ) -> torch.Tensor:
         """Return refined tokens with Δτ, Δν applied to valid paths only."""
-        delta = self.net(tokens)  # [B, L, 2]
-        delta = torch.tanh(delta) * self.max_correction  # bounded ±0.5
+        B, L, D = tokens.shape
+        # Branch B: scalar features from first 9 dims
+        scalar_feat = self.scalar_encoder(tokens[:, :, :9])
+
+        if self.has_patch:
+            # Branch A: geometric features from 3×3 patch (dims 9-17)
+            patch = tokens[:, :, 9:18].reshape(B * L, 1, 3, 3)
+            geo_feat = self.patch_encoder(patch).view(B, L, -1)  # [B, L, 8]
+            fused = torch.cat([geo_feat, scalar_feat], dim=-1)
+        else:
+            fused = scalar_feat
+
+        delta = self.decoder(fused)  # [B, L, 2]
+        delta = torch.tanh(delta) * self.max_correction
         refined = tokens.clone()
         valid_f = valid.to(tokens.dtype).unsqueeze(-1)
         refined[:, :, 0] += delta[:, :, 0] * valid_f.squeeze(-1)
         refined[:, :, 1] += delta[:, :, 1] * valid_f.squeeze(-1)
-        # Clamp to physical range after correction
-        refined[:, :, 0].clamp_(0.0, 12.0)   # delay ∈ [0, 12]
-        refined[:, :, 1].clamp_(-3.0, 3.0)   # doppler ∈ [-3, 3]
+        refined[:, :, 0].clamp_(0.0, 12.0)
+        refined[:, :, 1].clamp_(-3.0, 3.0)
         return refined
 
 

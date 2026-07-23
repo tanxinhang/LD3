@@ -176,16 +176,22 @@ def estimated_path_tokens_v2(
     sigma_tau: np.ndarray | None = None,
     sigma_nu: np.ndarray | None = None,
     relevance: np.ndarray | None = None,
+    score_map: np.ndarray | None = None,
+    grid_delay: np.ndarray | None = None,
+    grid_doppler: np.ndarray | None = None,
+    attach_patch: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Create 9-dim tokens from DD-estimated support + LS-estimated gains.
+    """Create tokens from DD-estimated support + LS-estimated gains.
 
-    If quality metrics are provided (from compute_path_quality), they replace
-    hardcoded defaults. Otherwise falls back to legacy constants.
+    When attach_patch=True, tokens are 18-dim:
+      0-8: same 9 scalar fields
+      9-17: flattened 3x3 score_map patch around NMS/OMP peak (normalised)
 
-    This is the Gate 1-E token source — real-world scenario where tokens
-    come from DD detection + LS, not Oracle truth.
+    The DDTokenRefiner uses the patch to predict Δτ,Δν from local
+    score_map shape (peak curvature, asymmetry, sidelobes).
     """
-    tokens = np.zeros((max_paths, 9), dtype=np.float32)
+    dim = 18 if attach_patch else 9
+    tokens = np.zeros((max_paths, dim), dtype=np.float32)
     valid = np.zeros(max_paths, dtype=bool)
     n_paths = min(max_paths, len(est.delay_bins))
     order = np.argsort(np.abs(ls_gains))[::-1][:n_paths]
@@ -201,6 +207,28 @@ def estimated_path_tokens_v2(
     tokens[:n_paths, 7] = ls_gains[order].real.astype(np.float32)
     tokens[:n_paths, 8] = ls_gains[order].imag.astype(np.float32)
     valid[:n_paths] = True
+
+    if attach_patch and score_map is not None and grid_delay is not None and grid_doppler is not None:
+        n_d, n_f = score_map.shape
+        for l in range(n_paths):
+            tau = float(est.delay_bins[order[l]])
+            nu = float(est.doppler_bins[order[l]])
+            i0 = int(np.argmin(np.abs(grid_delay - tau)))
+            j0 = int(np.argmin(np.abs(grid_doppler - nu)))
+            patch = np.zeros(9, dtype=np.float32)
+            pi = 0
+            for di in range(-1, 2):
+                for dj in range(-1, 2):
+                    ii = i0 + di
+                    jj = (j0 + dj) % n_f  # doppler wrap
+                    if 0 <= ii < n_d:
+                        patch[pi] = score_map[ii, jj]
+                    pi += 1
+            pmax = np.max(patch)
+            if pmax > 0:
+                patch /= pmax  # normalise to [0, 1]
+            tokens[l, 9:18] = patch
+
     return tokens, valid
 
 

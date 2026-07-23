@@ -1,0 +1,55 @@
+# Gate 2 OMP + Patch Refiner: Conv2d patch encoder for DDTokenRefiner
+#
+# Token v3 (18-dim): 9 scalar + 9 patch (3x3 score_map around OMP peak)
+# DDTokenRefiner with hybrid Conv2d(patch) + MLP(scalar) architecture
+#
+# Usage:
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_omp_patch.yaml \
+#     --output-dir results/gate2_omp_patch \
+#     --device cuda
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 3              # 18-dim: 9 scalar + 3x3 score patch
+  token_source: estimated
+  token_refine: ""              # NO VP — refiner does correction
+  detector_method: omp          # OMP detection
+
+training:
+  epochs: 100
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 1
+  use_quality_gate: true
+  use_path_stats: true
+  use_token_refiner: true
+  gate_kernel_size: 3

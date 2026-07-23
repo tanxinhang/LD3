@@ -153,6 +153,10 @@ class SyntheticOFDMISACDataset(Dataset):
                         est, g_hat, self.cfg.max_paths,
                         confidence=conf, sigma_tau=sig_t,
                         sigma_nu=sig_n, relevance=rel,
+                        score_map=score_map if self.cfg.token_version >= 3 else None,
+                        grid_delay=grid.delay_bins if self.cfg.token_version >= 3 else None,
+                        grid_doppler=grid.doppler_bins if self.cfg.token_version >= 3 else None,
+                        attach_patch=self.cfg.token_version >= 3,
                     )
             else:
                 # No paths detected — empty tokens, no Oracle leak
@@ -160,7 +164,7 @@ class SyntheticOFDMISACDataset(Dataset):
                     patch_size = (2 * 2 + 1) ** 2  # R=2 → 25
                     dim = 9 + patch_size + 2 * patch_size  # 84
                 else:
-                    dim = 9 if self.cfg.token_version >= 2 else 7
+                    dim = 18 if self.cfg.token_version >= 3 else (9 if self.cfg.token_version >= 2 else 7)
                 tokens = np.zeros((self.cfg.max_paths, dim), dtype=np.float32)
                 valid = np.zeros(self.cfg.max_paths, dtype=bool)
         elif self.cfg.token_version >= 2:
