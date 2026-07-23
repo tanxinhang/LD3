@@ -141,23 +141,15 @@ class SyntheticOFDMISACDataset(Dataset):
                     est, g_hat, observed, mask, score_map,
                     self.ofdm.num_subcarriers, self.ofdm.num_symbols,
                 )
-                if self.cfg.token_version >= 3:
-                    tokens, valid = estimated_path_tokens_v3(
-                        est, g_hat, self.cfg.max_paths,
-                        score_map, gain_map, grid.delay_bins, grid.doppler_bins,
-                        confidence=conf, sigma_tau=sig_t,
-                        sigma_nu=sig_n, relevance=rel,
-                    )
-                else:
-                    tokens, valid = estimated_path_tokens_v2(
-                        est, g_hat, self.cfg.max_paths,
-                        confidence=conf, sigma_tau=sig_t,
-                        sigma_nu=sig_n, relevance=rel,
-                        score_map=score_map if self.cfg.token_version >= 3 else None,
-                        grid_delay=grid.delay_bins if self.cfg.token_version >= 3 else None,
-                        grid_doppler=grid.doppler_bins if self.cfg.token_version >= 3 else None,
-                        attach_patch=self.cfg.token_version >= 3,
-                    )
+                tokens, valid = estimated_path_tokens_v2(
+                    est, g_hat, self.cfg.max_paths,
+                    confidence=conf, sigma_tau=sig_t,
+                    sigma_nu=sig_n, relevance=rel,
+                    score_map=score_map if self.cfg.token_version >= 3 else None,
+                    grid_delay=grid.delay_bins if self.cfg.token_version >= 3 else None,
+                    grid_doppler=grid.doppler_bins if self.cfg.token_version >= 3 else None,
+                    attach_patch=self.cfg.token_version >= 3,
+                )
             else:
                 # No paths detected — empty tokens, no Oracle leak
                 if self.cfg.token_version >= 3:
