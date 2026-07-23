@@ -557,22 +557,33 @@ class PhysicalResidualEstimator(nn.Module):
         fusion_mode: str = "spatial",  # "spatial" | "fixed"
         fixed_lam: float = 0.80,       # λ for fixed fusion
         use_residual: bool = True,     # enable/disable ΔH
-        residual_coupling: str = "none",  # "none" | "gate" — gate-scales residual
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         batch, _, N, M = tf_input.shape
 
-        # 1. TF encoding
+        # 1. TF standalone estimator (H_TF^standalone)
         tf_features = self.tf_encoder(tf_input)          # [B, H, N, M]
         H_tf = tf_input[:, :2] + self.tf_head(tf_features)  # [B, 2, N, M]
 
-        # 2. Learned DD position refinement (replaces VP as differentiable layer)
+        # 2. Learned DD position refinement
         if self.use_token_refiner:
             path_tokens = self.token_refiner(path_tokens, path_valid)
 
         # 3. Explicit physical reconstruction
         H_phys = self.physics(path_tokens, path_valid)    # [B, 2, N, M]
 
-        # 3. Gated fusion
+        # 4. Physics residual correction → Physics expert
+        E_phys = H_phys  # fallback if residual disabled
+        if use_residual:
+            residual_input = torch.cat([tf_features, H_phys], dim=1)
+            delta = self.residual(residual_input)          # [B, 2, N, M]
+            if fusion_mode == "fixed":
+                E_phys = H_phys + fixed_lam * delta  # scale residual like blend
+            else:
+                E_phys = H_phys + delta
+        else:
+            delta = torch.zeros_like(H_phys)
+
+        # 5. Confidence gate c ∈ [0,1]: how much to trust Physics expert over TF
         gate_parts = [tf_features, H_phys, H_tf]
         if self.use_quality_gate:
             quality_map = _build_quality_map(H_phys, H_tf, path_tokens, path_valid)
@@ -581,52 +592,35 @@ class PhysicalResidualEstimator(nn.Module):
             path_stats = _build_path_stats(path_tokens, path_valid, N, M)
             gate_parts.append(path_stats)
         gate_input = torch.cat(gate_parts, dim=1)
-        g_raw = self.gate(gate_input)                     # [B, 1, N, M]
+        c_raw = self.gate(gate_input)                     # [B, 1, N, M]
 
-        # Hard null-fallback: when ALL tokens are invalid, force gate to zero.
-        has_any_valid = path_valid.any(dim=1).to(g_raw.dtype)       # [B]
+        # Hard null-fallback: ALL tokens invalid → c=0 → Ĥ = H_tf (guaranteed)
+        has_any_valid = path_valid.any(dim=1).to(c_raw.dtype)       # [B]
         has_any_valid = has_any_valid[:, None, None, None]           # [B, 1, 1, 1]
-        g = has_any_valid * g_raw                                    # [B, 1, N, M]
+        c = has_any_valid * c_raw                                    # [B, 1, N, M]
 
-        H_fused = g * H_phys + (1.0 - g) * H_tf            # [B, 2, N, M]
-
-        # --- Ablation: fusion mode ---
-        if fusion_mode == "fixed":
-            lam = fixed_lam
-            H_fused = lam * H_phys + (1.0 - lam) * H_tf
-            g = torch.full_like(g, lam)  # constant gate for diagnostics
-
-        # 4. Residual correction
-        residual_input = torch.cat([tf_features, H_fused], dim=1)
-        delta = self.residual(residual_input)              # [B, 2, N, M]
-
-        if not use_residual:
-            H_out = H_fused
-        elif residual_coupling == "gate":
-            # Gate-coupled: residual scaled by gate (v2 approach).
-            # g→0: H_out = H_tf, g→1: H_out = H_phys + delta
-            H_out = H_fused + g * delta
-        else:
-            # Unscaled residual: ΔH always fully applied.
-            # This is the v1 default and the correct baseline for 2×2.
-            H_out = H_fused + delta
+        # 6. Safe fallback output:
+        #    c=0 → Ĥ = H_tf          (TF only, structural guarantee)
+        #    c=1 → Ĥ = E_phys        (Physics expert with residual)
+        #    c∈(0,1) → soft blend
+        H_out = H_tf + c * (E_phys - H_tf)
 
         # --- Diagnostics ---
         with torch.no_grad():
             p_tf = H_tf.square().sum(dim=(1, 2, 3))
-            p_fused = H_fused.square().sum(dim=(1, 2, 3))
             p_phys = H_phys.square().sum(dim=(1, 2, 3))
             p_delta = delta.square().sum(dim=(1, 2, 3))
+            p_ephys = E_phys.square().sum(dim=(1, 2, 3))
             p_out = H_out.square().sum(dim=(1, 2, 3))
-            phys_mix = (g * H_phys).square().sum(dim=(1, 2, 3))
+            phys_mix = (c * E_phys).square().sum(dim=(1, 2, 3))
 
         diagnostics = {
-            "gate_mean": g.mean(),
-            "gate": g,
+            "confidence_mean": c.mean(),
+            "confidence": c,
             "p_tf_mean": p_tf.mean(),
-            "p_fused_mean": p_fused.mean(),
             "p_phys_mean": p_phys.mean(),
             "p_delta_mean": p_delta.mean(),
+            "p_ephys_mean": p_ephys.mean(),
             "p_out_mean": p_out.mean(),
             "phys_mix_mean": phys_mix.mean(),
             "frac_null": 1.0 - has_any_valid.float().mean(),
@@ -634,20 +628,29 @@ class PhysicalResidualEstimator(nn.Module):
         if return_components:
             diagnostics["H_phys"] = H_phys
             diagnostics["H_tf"] = H_tf
-            # Expert outputs for MoE auxiliary training
-            diagnostics["E_phys"] = H_phys + delta  # Physical expert
-            diagnostics["E_tf"] = H_tf              # TF expert
+            diagnostics["E_phys"] = E_phys
+            diagnostics["E_tf"] = H_tf
         return H_out, diagnostics
 
-    def freeze_residual(self) -> None:
-        """Freeze residual head for phase training."""
+    def freeze_physics_branch(self) -> None:
+        """Freeze Refiner + PhysicalReconstructor + Residual (Stage 2)."""
+        if self.use_token_refiner:
+            for p in self.token_refiner.parameters():
+                p.requires_grad = False
         for p in self.residual.parameters():
             p.requires_grad = False
 
-    def unfreeze_residual(self) -> None:
-        """Unfreeze residual head after warmup."""
-        for p in self.residual.parameters():
-            p.requires_grad = True
+    def freeze_tf_branch(self) -> None:
+        """Freeze TF encoder + head (Stage 3)."""
+        for p in self.tf_encoder.parameters():
+            p.requires_grad = False
+        for p in self.tf_head.parameters():
+            p.requires_grad = False
+
+    def freeze_confidence_gate(self) -> None:
+        """Freeze gate only (Stage 2, when training physics)."""
+        for p in self.gate.parameters():
+            p.requires_grad = False
 
 
 # ---------------------------------------------------------------------------
