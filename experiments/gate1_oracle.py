@@ -849,13 +849,13 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
                 and len(per_seed_nmse["physics_residual"]) >= 2):
             ddls_arr = ddls_per_sample["nmse_estimated_support_ls"]
             ddls_replicated = [ddls_arr] * len(per_seed_nmse["physics_residual"])
-            hb["physical_residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
+            hb["physics_residual_vs_ddls_paired_gain_linear"] = paired_bootstrap_gain(
                 ddls_replicated, per_seed_nmse["physics_residual"],
             )
 
         # Gate mean for physics_residual
         if "physics_residual" in per_seed_gate and per_seed_gate["physics_residual"]:
-            hb["physical_residual_gate_mean"] = float(
+            hb["physics_residual_gate_mean"] = float(
                 np.mean(per_seed_gate["physics_residual"])
             )
 
@@ -1023,11 +1023,11 @@ def run(config: dict[str, Any], output_dir: Path) -> None:
         if "physics_residual_nmse_linear" in hb:
             res_hb = hb["physics_residual_nmse_linear"]
             print(f"  Physical Residual NMSE linear: {res_hb['mean']:.6f} [{res_hb['ci_lower']:.6f}, {res_hb['ci_upper']:.6f}]")
-        if "physical_residual_vs_ddls_paired_gain_linear" in hb:
-            pg = hb["physical_residual_vs_ddls_paired_gain_linear"]
+        if "physics_residual_vs_ddls_paired_gain_linear" in hb:
+            pg = hb["physics_residual_vs_ddls_paired_gain_linear"]
             print(f"  PhysRes vs DD+LS paired gain: mean={pg['mean_diff']:.5f} [{pg['ci_lower']:.5f}, {pg['ci_upper']:.5f}]")
-        if "physical_residual_gate_mean" in hb:
-            print(f"  Physical Residual gate mean: {hb['physical_residual_gate_mean']:.4f}")
+        if "physics_residual_gate_mean" in hb:
+            print(f"  Physical Residual gate mean: {hb['physics_residual_gate_mean']:.4f}")
     print(f"\n--- Gate 1 Status ---")
     for gate, info in all_results["gate_1_status"].items():
         print(f"  {gate}: {info['status']}")

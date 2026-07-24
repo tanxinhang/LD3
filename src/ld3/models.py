@@ -479,9 +479,9 @@ class PhysicalResidualEstimator(nn.Module):
       valid_ratio gives the gate an explicit all-tokens-invalid signal.
 
     When use_quality_gate=True, the gate additionally receives
-    a 3-channel token-quality map: discrepancy |H_phys-H_tf|², mean token
-    confidence, and mean token uncertainty. This lets the gate learn to
-    reject the physics branch when token quality is poor.
+    a 4-channel token-quality map: discrepancy |H_phys-H_tf|², mean token
+    confidence, mean token uncertainty, and valid_ratio. This lets the
+    gate learn to reject the physics branch when token quality is poor.
     """
 
     def __init__(

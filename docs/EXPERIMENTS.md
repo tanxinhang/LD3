@@ -168,8 +168,8 @@ for K,path in [(4,'results/gate1_estimated'), (6,'results/gate1_K6'), (8,'result
     ddls = d['non_learned_baselines']['test']['nmse_estimated_support_ls']['nmse_db']
     er = hb['physics_residual_nmse_linear']
     er_db = 10*math.log10(er['mean'])
-    gain = hb['physical_residual_vs_ddls_paired_gain_linear']
-    print(f'K={K}: DD+LS={ddls:+.1f}, PhysRes={er_db:+.1f} [{er[\"ci_lower\"]:.4f}, {er[\"ci_upper\"]:.4f}], gain={gain[\"mean_diff\"]:.4f} [{gain[\"ci_lower\"]:.4f}, {gain[\"ci_upper\"]:.4f}], gate={hb[\"physical_residual_gate_mean\"]:.3f}')
+    gain = hb['physics_residual_vs_ddls_paired_gain_linear']
+    print(f'K={K}: DD+LS={ddls:+.1f}, PhysRes={er_db:+.1f} [{er[\"ci_lower\"]:.4f}, {er[\"ci_upper\"]:.4f}], gain={gain[\"mean_diff\"]:.4f} [{gain[\"ci_lower\"]:.4f}, {gain[\"ci_upper\"]:.4f}], gate={hb[\"physics_residual_gate_mean\"]:.3f}')
 "
 ```
 
