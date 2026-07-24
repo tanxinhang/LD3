@@ -52,5 +52,5 @@ training:
   num_seeds: 1
   use_quality_gate: true
   use_path_stats: true
-  use_token_refiner: true
+  use_token_refiner: false     # OFF — end-to-end gradient too weak
   gate_kernel_size: 3
