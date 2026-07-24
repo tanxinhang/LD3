@@ -836,8 +836,11 @@ consistent with the gate×ΔH substitution relationship.
 
 4. **Inference speed penalty.** 0.451s vs 0.045s for MoE (10× slower).
 OMP's iterative greedy detection (per-sample Python loop) and v3's 84-dim
-token processing dominate runtime. Not a bottleneck for offline evaluation
-but relevant for real-time deployment feasibility.
+token processing dominate runtime. Optimization path: (a) batch OMP
+residual projection, (b) precompute and cache DD dictionary, (c) batched
+Cholesky/QR for LS updates, (d) vectorize per-path iteration. Report FLOPs,
+parameter count, and per-sample latency. Not a bottleneck for offline
+evaluation but relevant for any real-time deployment claims.
 
 ### 11.13 Cross-Model Baselines Consensus (2026-07-24)
 
@@ -879,7 +882,7 @@ multi-frame tracking) rather than improving fusion architecture.
 
 ```
 Gate 2 Complete:
-  ✅ Oracle token experiment — definitive bottleneck answer
+  ✅ Oracle token experiment — quantifies path-parameter quality gap
   ✅ 9-dim scalar optimal for fusion gate; DD patches useful for Refiner
   ✅ 2×2: residual 78-82%, spatial gate 18-22% (4-variant consensus)
   ✅ Gate without ΔH always harmful (−0.5 to −1.2 dB, 4/4 variants)

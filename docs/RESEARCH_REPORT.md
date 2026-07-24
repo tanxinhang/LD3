@@ -661,6 +661,11 @@ the -0.4 or -2.5 dB gap as the structural safety cost.
 Gate supervision (BCE) retired -- structurally incompatible with the
 differentiable Refiner and no longer needed for all-invalid fallback.
 
+**Important**: the full corruption audit (phase, jitter, coherent false,
+dropout) has only been run on the old Gate 2-C / NMS pipeline, NOT on the
+canonical OMP+Conv2d Refiner + Safe Fallback pipeline. Structure pass ≠
+safety pass. See P2 in `docs/IMPLEMENTATION_STATUS.md`.
+
 See `docs/GATE2_DESIGN.md` §11.8–11.15 for complete analysis.
 
 ### 5.14 Cross-Model Mechanism Baselines (2026-07-24)
@@ -760,7 +765,7 @@ TF-only                                    −4.6~−5.1
 
 ### 5.15 Oracle Token Upper-Bound Experiment (2026-07-24)
 
-The definitive answer to the "token quality vs architecture" bottleneck question.
+The oracle experiment provides strong evidence on the "token quality vs architecture" bottleneck question.
 Using `gate2_canonical_oracle.yaml` with `token_source: oracle` — true {τ, ν, α}
 from the channel simulator — this experiment removes ALL token estimation error
 from the pipeline.
@@ -963,7 +968,7 @@ Gate 2-D18  Cross-model baselines_safety comparison ...... COMPLETE (4 variants)
 Gate 2-D19  Gate×ΔH substitution relationship ............. DISCOVERED (better ΔH → smaller gate gain)
 Gate 2-S1   Frozen-expert three-stage training ............ OPEN
 Gate 2-S2   Corruption audit on safe fallback pipeline .... OPEN
-Gate 2-S3   Oracle token + PhysicalResidual upper bound ... **COMPLETE ✅ (H_phys=−117 dB, token-limited)**
+Gate 2-S3   Oracle token + PhysicalResidual upper bound ... **COMPLETE ✅ (H_phys=−117 dB; path-parameter quality dominates)**
 
 Gate 3      Full OFDM-ISAC waveform .................... OPEN
 ```

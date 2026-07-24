@@ -169,13 +169,16 @@ TF-only                                    −4.6~−5.1           gate1_results
 ─────────────────────────────────────────────────────────────────────────────
 ```
 
-[★] Oracle token experiment definitively answers the bottleneck question:
-     H_phys with perfect tokens = −117 dB (numerical precision). The 49 dB
-     oracle→estimated gap is overwhelmingly token quality, not architecture.
+[★] Oracle experiment: H_phys with perfect {τ,ν,α} = −117 dB (numerical
+     precision). The 49 dB oracle→estimated gap reflects combined position,
+     gain, and support error — 4-cell decomposition required to isolate.
 
 [1] Gate supervision (BCE) + Refiner incompatible (NaN). P0 and Refiner are
     mutually exclusive branches.
 [2] Single-model evaluation; multi-seed bootstrap for MoE only.
+    Safe fallback at −10.39 dB does NOT use DDTokenRefiner. The −12.87 dB
+    Refiner result uses the old unconstrained gate formula. These are
+    different backbones — direct comparison is invalid. See P0 below.
 [3] Fixed λ + ΔH range across 4 model variants. Best single value: −10.21 dB
     (Safe fallback, λ=0.80). See cross-model comparison below.
 
@@ -209,9 +212,11 @@ forward path with `fix_c` ablation control.
 | Token augment | No | No | **Yes** (dropout+shuffle) | No |
 | Path stats | No | No | No | **Yes** (7-ch) |
 | Gate kernel | 1×1 | 1×1 | 1×1 | **3×3** |
+| **DDTokenRefiner** | No | No | No | **No** (disabled) |
 | Best NMSE (full) | −10.45 | **−10.65** | −10.49 | −10.57 |
 | Best NMSE (fixed+ΔH) | −10.17 | −9.92 | −10.01 | **−10.21** |
 | Gate marginal gain | +0.28 | **+0.73** | +0.48 | +0.36 |
+| **Note** | | | | **Not comparable to −12.87 Refiner branch** |
 
 ---
 
@@ -247,7 +252,11 @@ A clear **gate×ΔH substitution relationship** emerges: variants with stronger 
 
 6. **MoE auxiliary losses** increase gate marginal gain from +0.28 to +0.73 dB but slightly reduce fixed+ΔH performance (−10.17→−9.92 dB). The aux losses reshape expert behavior rather than strengthening individual experts.
 
-7. **Safe Fallback is structure-verified, not safety-verified.** All-invalid → c=0
+7. **OMP inference is 10× slower than NMS** (0.451s vs 0.045s per 1024 samples).
+   Bottleneck is per-sample Python OMP loop + v3 token processing. Optimization
+   path: batch residual projection, precomputed dictionary, batched Cholesky LS.
+   
+8. **Safe Fallback is structure-verified, not safety-verified.** All-invalid → c=0
    is structurally guaranteed. However, the full corruption audit (phase error,
    coherent false, jitter, dropout) has only been run on the old Gate 2-C / NMS
    pipeline, NOT on the canonical OMP+Conv2d Refiner + Safe Fallback pipeline.
@@ -258,9 +267,19 @@ A clear **gate×ΔH substitution relationship** emerges: variants with stronger 
 ## Immediate Next Steps (Priority-Ordered)
 
 **P0: Unify Refiner + Safe Fallback onto a single canonical backbone.**
-Same OMP+Conv2d Refiner, same seed/test-bank/epochs, old gate vs safe fallback
-paired comparison with hierarchical bootstrap. Answers: what is the clean-NMSE
-cost of structural safety on the best pipeline?
+Same OMP+Conv2d Refiner, same seed (3-5 seeds, 300 epochs), same fixed test
+bank. Canonical comparison table:
+
+| Case | Detector | Refiner | Residual | Fusion | Answers |
+|------|----------|---------|----------|--------|---------|
+| C0 | OMP | No | No | Physics only | Refiner value |
+| C1 | OMP | Conv2d | No | Physics only | Refiner+ΔH value |
+| C2 | OMP | Conv2d | Yes | Fixed c=1 | Old gate value |
+| C3 | OMP | Conv2d | Yes | Old gate | Safe cost |
+| C4 | OMP | Conv2d | Yes | Safe fallback | λ baseline |
+| C5 | OMP | Conv2d | Yes | Fixed λ (val-optimized) | |
+
+Only C3 vs C4 answers: what is the clean-NMSE cost of structural safety?
 
 **P1: Token error causal decomposition (4-cell oracle experiment).**
 Case A: true {τ,ν,α} (done), Case B: true {τ,ν} + LS-α, Case C: refined
