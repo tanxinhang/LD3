@@ -1,6 +1,6 @@
 # LD3 Research Report — Gate 0 & Gate 1 Final Results
 
-Date: 2026-07-24 (final — Gate 2 complete, 4-variant baselines, safe fallback)
+Date: 2026-07-24 (Gate 2 mechanism audit complete; canonical safe-pipeline validation open)
 
 ---
 
@@ -545,10 +545,13 @@ using gate alone (both v1 and v2) harms performance.
 | v3 (84-dim) | −10.52 | 0.86 ☠️ | +1.78 ☠️ | 0.78 ☠️ | −1.71 | 0.87 ☠️ | −2.12 |
 | v3+sup+aug | −10.17 | 0.061 | −4.73 | 0.040 | −4.93 | 0.65 | −3.87 |
 
-**9-dim is optimal.** 84-dim DD spectrum patches require both gate supervision
-and augmentation to approach v1, and are worse on coherent false in every
-configuration. The simpler representation enables the gate to self-organise
-to 0.04 at phase π without any supervision or augmentation.
+**9-dim scalar tokens are optimal for the fusion gate input.** 84-dim DD spectrum
+patches, when fed directly to the fusion gate, create spurious correlations and
+require gate supervision + augmentation to approach v1. However, a compact 3×3
+local DD score patch is valuable as geometric input to the dedicated DDTokenRefiner
+(Conv2d patch refiner achieves +0.91 dB over MLP-only refiner, reaching −12.87 dB).
+These are two distinct input positions: the fusion gate benefits from a compact
+scalar representation, while the position refiner benefits from local spatial context.
 
 ### 5.8 Gate Supervision Breakthrough: P0 Optimized
 
@@ -776,13 +779,24 @@ from the pipeline.
 
 #### 5.15.2 The Definitive Answer
 
-**Q: Is the ~−10.6 dB ceiling architecture-limited or token-limited?**
+**Q: Is the ~−10.6 dB plateau driven by token quality or fusion architecture?**
 
-**A: Token-limited.** With oracle tokens, H_phys-only reaches −117 dB
-(numerical precision). The physical reconstruction formula is verified to
-machine epsilon. The 13.7 dB gap between estimated-token full model (−10.47 dB)
-and oracle-token full model (−59.58 dB) is **49.1 dB**, overwhelmingly
-attributable to DD token position error.
+**A: Path-parameter quality dominates.** The oracle experiment replaces all estimated
+path parameters {τ, ν, α} with their ground-truth values, eliminating LS gain error,
+support mismatch, and position error simultaneously. H_phys-alone reaches −117 dB
+(numerical precision). The full model reaches −59.58 dB.
+
+The physical reconstruction formula is verified to machine epsilon.
+The gap between estimated-token full model (−10.47 dB) and oracle-token
+full model (−59.58 dB) is **49.1 dB**, overwhelmingly attributable to
+path-parameter quality — a combination of position error, gain error, and
+support mismatch. Further decomposition (§5.15.7) isolates position vs gain
+contributions.
+
+**Important caveat**: the oracle intervention replaces all {τ, ν, α}
+simultaneously, not just DD positions. Attributing the entire gap to
+"token position error" alone is an overstatement without the 4-cell
+decomposition described in §5.15.7.
 
 ```
 Token quality hierarchy:
@@ -857,16 +871,39 @@ With estimated tokens: optimal λ=0.75-0.80 (physics not trustworthy).
 
 #### 5.15.6 Implications
 
-1. **Token quality is the sole bottleneck.** Closing the 49.1 dB gap requires
-   better DD detection (higher pilot density, multi-frame tracking, VP
-   refinement), not better fusion architecture.
-2. **With perfect tokens, the optimal model is H_phys directly** — no gate,
-   no ΔH, no learned components.
-3. **The gate+ΔH architecture is a token-error compensator**, not a general
-   channel estimator. Its value scales inversely with token quality.
+1. **Path-parameter quality is the dominant bottleneck.** Under the current
+   channel abstraction, improving DD detection (higher pilot density,
+   multi-frame tracking, VP/Refiner) provides far larger gains than further
+   fusion architecture changes. However, the oracle experiment replaces all of
+   {τ, ν, α} simultaneously — isolating position vs gain vs support contributions
+   requires the 4-cell decomposition in §5.15.7.
+2. **With perfect path parameters, the optimal model is H_phys directly** — no gate,
+   no ΔH, no learned components. The gate+ΔH architecture is a token-error
+   compensator, not a general-purpose channel estimator. Its value scales
+   inversely with token quality.
+3. **The −10.6 dB convergence is a fusion-variant empirical plateau**, not a hard
+   architecture ceiling. The OMP+Conv2d Refiner branch reaches −12.87 dB,
+   demonstrating that better token processing (not bigger fusion networks) is
+   the path to breakthrough.
 4. **Adaptive strategy**: if token quality can be estimated at inference time,
    bypass the gate and use pure H_phys when quality is high; use gate+ΔH
    when quality is low. This spans −117 dB to −10.47 dB dynamically.
+
+#### 5.15.7 Required Decomposition: Position vs Gain vs Support
+
+The oracle experiment replaces all {τ, ν, α} simultaneously. To isolate
+individual error sources, a 4-cell decomposition is needed:
+
+| Case | (τ, ν) | α | Isolates |
+|------|--------|---|----------|
+| A | true | true | Numerical closure (done: −117 dB) |
+| B | true | LS-estimated | Gain estimation error |
+| C | estimated/refined | true | Position + support error |
+| D | estimated/refined | LS-estimated | Full pipeline (done: −8.36 to −12.87 dB) |
+
+G_position = NMSE(D) − NMSE(B), G_gain = NMSE(B) − NMSE(A).
+Case C is the critical missing experiment — it isolates whether the dominant
+error is position/support or complex-gain estimation.
 
 ---
 
@@ -911,7 +948,7 @@ Gate 2-D5   Soft hold-out blend ......................... PASS (−9.06 dB, T=5,
 Gate 2-D6   2×2: Spatial gate alone ..................... −0.52 dB (HARMFUL without ΔH)
 Gate 2-D7   2×2: Residual ΔH alone ...................... +1.02 dB (78% of total gain)
 Gate 2-D8   2×2: Spatial gate given residual ............ +0.28 dB (marginal)
-Gate 2-D9   Token dimension: 9-dim optimal .............. PASS (84-dim net negative)
+Gate 2-D9   Token: 9-dim optimal for fusion gate ........ PASS (patch useful for refiner)
 Gate 2-D10  Gate supervision + matched aug .............. BREAKTHROUGH (harm 99%→5%)
 Gate 2-D11  Cross-run 2×2 consensus (3 runs) ............ PASS (robust)
 Gate 2-D12  P0: Normalized target + margin + clean ratio . PASS (Clean -10.79, gate 415×)

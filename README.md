@@ -321,7 +321,7 @@ The recommended progression:
 1. **Gate 0-A:** establish DD-identifiable operating region (known K) ✅
 2. **Gate 0-B:** unknown-K detection and open-set false alarm control ❌
 3. **Gate 1:** prove Oracle DD information improves over TF-only processing ✅
-4. **Gate 2:** safe degradation under corrupted tokens ✅
+4. **Gate 2:** mechanism audit ✅ (canonical safe-pipeline validation open)
 5. **Gate 3:** full OFDM-ISAC waveform ❌
 
 ---
@@ -351,7 +351,7 @@ Gate 2-D15a: Safe fallback formulation ............. IMPLEMENTED (c=0 → H_TF e
 Gate 2-D15b: MoE auxiliary losses .................. PASS (−10.47 dB)
 Gate 2-D15c: Safe fallback (gate2_safe) ............ PASS (−10.39 dB)
 Gate 2-D16: Cross-model baselines comparison ....... COMPLETE (4 variants)
-Gate 2-D17: **Oracle token upper-bound** ........... **PASS (H_phys=−117 dB → token-limited confirmed)**
+Gate 2-D17: **Oracle token upper-bound** ........... **PASS (H_phys=−117 dB → path-parameter quality dominates)**
 
 Gate 3: Full OFDM-ISAC waveform .................... OPEN
 ```

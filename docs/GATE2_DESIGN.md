@@ -1,6 +1,6 @@
 # Gate 2 Design — Safe Degradation Under Corrupted Priors
 
-Date: 2026-07-24 (final — cross-model baselines, MoE, safe fallback)
+Date: 2026-07-24 (mechanism audit complete; oracle upper-bound; next: canonical Safe+Refiner pipeline)
 
 ## Core Principle
 
@@ -363,8 +363,8 @@ between H_phys and H_TF that the gate can exploit.
 Oracle clean (−15.39 dB) >> Estimated clean (−10.22 dB) — the 5 dB
 gap comes entirely from token quality. Under strong corruption both
 chains converge to the same floor (~−3.4 dB null_all), confirming
-that the model's safety ceiling is architecture-limited, not
-token-quality-limited.
+that the model's safety floor is gated by architecture (null_all gap),
+not token-quality-limited under clean conditions.
 
 ### 11.3 Updated Priority
 
@@ -643,8 +643,10 @@ physics errors. Shutting it off when gate=0 exposes those weaknesses.
 | v3+sup | −10.37 | 0.74 | 0.92 ☠️ | +1.42 ☠️ | 0.51 | −2.13 | 0.89 ☠️ | −2.46 |
 | v3+sup+aug | −10.17 | 0.76 | 0.061 | −4.73 | 0.040 | −4.93 | 0.65 | −3.87 |
 
-**Finding 1: 9-dim is optimal. 84-dim DD patches are net negative.**
-84-dim requires both gate supervision AND augmentation to even approach
+**Finding 1: 9-dim scalar tokens are optimal for the fusion gate input.** 84-dim DD patches, when fed directly to the fusion gate, create spurious correlations.
+However, the 3×3 local DD score patch is valuable as geometric input to the
+dedicated Conv2d DDTokenRefiner (see §5.11). The two input positions have
+different requirements.
 v1, and underperforms on coherent false in every configuration. The DD
 patches create spurious correlations that make bad tokens look authentic.
 v1 achieves the best results with the simplest representation — no sup,
@@ -725,7 +727,7 @@ or dedicated phase augmentation scheduling.
 
 ```
 Gate 2 Complete (robust across 3+ training runs):
-  ✅ 9-dim token optimal (84-dim DD patches harmful)
+  ✅ 9-dim scalar optimal for fusion gate (DD patches useful for Refiner)
   ✅ 2×2: residual 78-82%, spatial gate 18-22% (3-run consensus)
   ✅ Hard fallback: null_all → TF-only ±0.3 dB
   ✅ Fixed blend (λ=0.80): −9.15 dB (1 param, no training)
@@ -854,7 +856,7 @@ variants. Complete results in `docs/RESEARCH_REPORT.md` §5.14.
 gain and ΔH contribution are inversely correlated (r ≈ −0.9). Stronger ΔH
 (better token quality → more accurate physics → residual can fix more) leaves
 less room for spatial gate to add value. Both converge to a common
-full-model NMSE of ~−10.6 dB, suggesting an architecture-limited ceiling.
+full-model NMSE of ~−10.6 dB — a fusion-variant plateau, not a hard ceiling (Refiner branch reaches −12.87 dB).
 
 **Performance ceiling at ~−10.6 dB:** The 13.7 dB gap to Oracle+LS (−24.29 dB)
 is almost entirely attributable to DD token position accuracy. To break through
@@ -868,30 +870,53 @@ multi-frame tracking) rather than improving fusion architecture.
 **Oracle token upper-bound (2026-07-24):**
 - H_phys-only with oracle tokens: **−117 dB** (numerical precision)
 - Full model with oracle tokens: **−59.58 dB** (gate @ ~0.999)
-- **Conclusion: TOKEN-LIMITED, not architecture-limited.**
-- The ~49 dB oracle→estimated gap confirms DD token quality is the sole bottleneck.
+- **Conclusion: path-parameter quality is the dominant bottleneck**, not fusion architecture.
+- The ~49 dB oracle→estimated gap is attributable to the combined effect of position
+  error, gain error, and support mismatch — NOT position error alone. A 4-cell
+  decomposition is required to isolate individual contributions.
 - Gate+ΔH architecture provides ~60 dB error suppression (compresses 109 dB H_phys
   degradation into 49 dB output degradation).
 
 ```
 Gate 2 Complete:
   ✅ Oracle token experiment — definitive bottleneck answer
-  ✅ 9-dim token optimal (84-dim DD patches harmful without OMP)
+  ✅ 9-dim scalar optimal for fusion gate; DD patches useful for Refiner
   ✅ 2×2: residual 78-82%, spatial gate 18-22% (4-variant consensus)
   ✅ Gate without ΔH always harmful (−0.5 to −1.2 dB, 4/4 variants)
   ✅ Gate×ΔH substitution relationship confirmed
-  ✅ Performance ceiling ~−10.6 dB (TOKEN-limited, not architecture-limited)
+  ✅ Empirical plateau ~−10.6 dB (path-parameter quality dominant; Refiner branch at −12.87 dB disproves hard ceiling)
   ✅ Safe fallback: structural c=0 → H_TF guarantee implemented
   ✅ MoE: +0.73 dB gate gain (highest)
   ✅ OMP detector: +2.28 dB over NMS
   ✅ Fixed λ + ΔH: within 0.3-0.7 dB of full model (1 param, no training)
 
-Gate 3 (Future):
-  P1: Improve DD detection — the ONLY path to break −10.6 dB
-      (oracle experiment proves token quality accounts for 49 of ~52 dB gap)
-  P2: Adaptive gate bypass — when token quality is high, use H_phys directly
-  P3: Multi-SNR robust evaluation
-  P4: K=6,8 safe fallback evaluation
+Gate 3 (Next — ordered by priority):
+
+  P0: Unify Refiner + Safe Fallback onto a single canonical backbone
+      → 3-5 seeds, 300 epochs, same OMP+Conv2d Refiner, same test bank
+      → old gate vs safe fallback paired comparison with hierarchical bootstrap
+      → Answers: what is the clean-NMSE cost of structural safety on the best pipeline?
+
+  P1: Token error causal decomposition (4-cell oracle experiment)
+      → Case A: true {τ,ν,α}       (done: −117 dB)
+      → Case B: true {τ,ν} + LS-α   (isolates gain error)
+      → Case C: refined {τ,ν} + true α (isolates position + support error)
+      → Case D: refined {τ,ν} + LS-α   (full pipeline, done)
+      → Also: true support with continuous offsets, correct-matched only,
+        false retained, missed removed
+
+  P2: Corruption audit on canonical Safe+Refiner model
+      → Per-sample TF baseline, harm rate, worst-10%, max degradation, paired CI
+      → Conditions: clean, all-null, dropout, jitter, phase, coherent false,
+        natural OMP errors
+      → all-null must satisfy max_i |H_out,i − H_TF,i|_∞ < 1e-7
+
+  P3: Unknown-K detection (Gate 0-B)
+      → OMP stopping rule, over/under-detection, false path handling,
+        adaptive valid mask
+      → This is the main realism gap — all current results use Known-K
+
+  P4: Multi-SNR, K=6,8 robust evaluation
 ```
 
 ### 11.15 Core Architectural Insight (Final)

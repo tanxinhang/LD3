@@ -1,6 +1,6 @@
 # Implementation Status
 
-Date: 2026-07-24 (v0.3 — Gate 2 complete, safe fallback, baselines)
+Date: 2026-07-24 (v0.3 — Gate 2 mechanism audit complete; canonical safe-pipeline validation open)
 
 ## Critical P0 checks
 
@@ -93,7 +93,9 @@ Added 4-channel token-quality map to fusion gate input (discrepancy, confidence,
 | v2-3 | Quality map v2 (+valid_ratio) | NO GAIN | Absorbed by CNN gate |
 | v2-4 | 2×2 cross-run robustness | PASS ✅ | Same pattern across v1 + v2 | 
 
-### Gate 2-D: Architecture & Mechanism Baselines — MOSTLY COMPLETE ✅
+### Gate 2-D: Architecture & Mechanism Baselines — MECHANISM AUDIT COMPLETE ✅
+
+Note: corruption audit on canonical Safe+Refiner pipeline remains OPEN.
 
 | Sub-gate | What | Status | Key finding |
 |---|---|---|---|
@@ -105,7 +107,7 @@ Added 4-channel token-quality map to fusion gate input (discrepancy, confidence,
 | 2-D6 | **2×2 ablation: gate alone** | PASS ✅ | **−0.52 dB HARMFUL** (3-run consensus) |
 | 2-D7 | **2×2 ablation: ΔH alone** | PASS ✅ | **+0.78~1.02 dB (78-82% of total)** |
 | 2-D8 | **2×2 ablation: gate given ΔH** | PASS ✅ | **+0.13~0.48 dB (18-22% of total)** |
-| 2-D9 | Token dimension: 9-dim optimal | PASS ✅ | 84-dim DD patches net negative |
+| 2-D9 | Token dimension: 9-dim optimal for fusion gate | PASS ✅ | DD patches useful for Refiner, not gate |
 | 2-D10 | Gate supervision + matched aug | PASS ✅ | Harm 99%→5%, clean −9.21 dB |
 | 2-D11 | P0 optimized (normalized target + margin + clean ratio) | PASS ✅ | Clean −10.79 dB, gate 415× range |
 | 2-D12 | OMP detector | PASS ✅ | +2.28 dB over NMS |
@@ -115,26 +117,26 @@ Added 4-channel token-quality map to fusion gate input (discrepancy, confidence,
 | 2-D15b | MoE auxiliary losses | PASS ✅ | Clean −10.47 dB, gate gain +0.73 dB |
 | 2-D15c | Safe fallback (gate2_safe): token v3+OMP | PASS ✅ | Clean −10.39 dB, fixed+ΔH −10.21 dB |
 | 2-D16 | Cross-model baselines_safety comparison | COMPLETE ✅ | 4 variants compared, ΔH dominant |
-| 2-D17 | **Oracle token upper-bound** | **PASS ✅** | **H_phys=−117 dB, model=−59.58 dB, token-limited confirmed** |
-| 2-S3 | Oracle token + PhysicalResidual upper bound | **COMPLETE ✅** | Token quality is sole bottleneck |
+| 2-D17 | **Oracle token upper-bound** | **PASS ✅** | **H_phys=−117 dB, path-parameter quality is dominant bottleneck** |
+| 2-S3 | Oracle token + PhysicalResidual upper bound | **COMPLETE ✅** | Replaces all {τ,ν,α}; 4-cell decomposition pending |
 
 ---
 
 ## Oracle Token Experiment (2026-07-24) — Definitive Answer
 
-**Q: Is the ~−10.6 dB ceiling architecture-limited or token-limited?**
+**Q: Is the ~−10.6 dB plateau driven by token quality or fusion architecture?**
 
-**A: Token-limited, by a factor of ~49 dB.**
+**A: Path-parameter quality dominates.** The oracle experiment replaces all estimated
+path parameters {τ, ν, α} with ground-truth. H_phys-alone = **−117.14 dB**
+(numerical precision). Full model = **−59.58 dB** (CNN gate ~0.999 limits
+performance). The 49 dB oracle→estimated gap is attributable to the combined
+effect of position error, gain error, and support mismatch — the 4-cell
+decomposition in RESEARCH_REPORT.md §5.15.7 is needed to isolate individual
+contributions.
 
-With oracle tokens (perfect τ, ν, α):
-- H_phys-only = **−117.14 dB** (numerical precision) — physical reconstruction verified
-- Full model = **−59.58 dB** — CNN gate ~0.999 limits performance
-- H_phys degradation (oracle→estimated): **108.6 dB**
-- Full model degradation (oracle→estimated): **49.1 dB**
-- Gate+ΔH error suppression: **~60 dB**
-
-The model's output formula `H_out = H_TF + c·(E_phys−H_TF)` means any
-deviation from c=1.0 leaks TF noise. CNN gate at ~0.999 caps NMSE at ~−60 dB.
+**Important**: OMP+Conv2d Refiner reaches −12.87 dB, disproving a hard −10.6 dB
+ceiling. The ~−10.6 dB convergence of four fusion variants is an empirical
+plateau under the current NMS/OMP token pipeline, not an architecture limit.
 
 ## Current Performance Ladder
 
@@ -224,7 +226,7 @@ forward path with `fix_c` ablation control.
 
 **Core finding**: The spatial gate does NOT directly improve reconstruction. It selectively suppresses the physics branch, creating room for the zero-init residual ΔH. Gate and residual must be trained jointly — gate alone without ΔH is consistently harmful across all training configurations and model variants.
 
-A clear **gate×ΔH substitution relationship** emerges: variants with stronger ΔH (Safe fallback: +1.11 dB) show smaller gate marginal gain (+0.36 dB), while variants with weaker ΔH (MoE: +0.78 dB) show larger gate gain (+0.73 dB). Both converge to ~−10.6 dB full-model NMSE, suggesting an architecture-limited performance ceiling.
+A clear **gate×ΔH substitution relationship** emerges: variants with stronger ΔH (Safe fallback: +1.11 dB) show smaller gate marginal gain (+0.36 dB), while variants with weaker ΔH (MoE: +0.78 dB) show larger gate gain (+0.73 dB). All four variants converge to ~−10.6 dB full-model NMSE — a fusion-variant empirical plateau, not a hard architecture ceiling (Refiner branch reaches −12.87 dB).
 
 ---
 
@@ -232,7 +234,10 @@ A clear **gate×ΔH substitution relationship** emerges: variants with stronger 
 
 1. **Output formula**: `H_out = H_TF + c · (E_phys − H_TF)` where `E_phys = H_phys + ΔH`. Structural guarantee: c=0 → exact TF-only output. Hard rule: all tokens invalid → c=0.
 
-2. **9-dim tokens are optimal**. 84-dim DD spectrum patches create spurious correlations and require gate supervision + augmentation to match 9-dim baseline.
+2. **9-dim scalar tokens are optimal for the fusion gate input**. DD spectrum patches
+   (3×3 score map) are harmful when fed directly to the fusion gate but are valuable
+   as local geometric input to the dedicated DDTokenRefiner (Conv2d patch refiner
+   achieves +0.91 dB over MLP-only refiner, reaching −12.87 dB).
 
 3. **Zero-init residual ΔH** contributes 78-82% of total fusion gain. The spatial gate contributes 18-22%.
 
@@ -241,6 +246,35 @@ A clear **gate×ΔH substitution relationship** emerges: variants with stronger 
 5. **OMP detector** provides +2.28 dB over NMS for DD+LS baseline without any learning.
 
 6. **MoE auxiliary losses** increase gate marginal gain from +0.28 to +0.73 dB but slightly reduce fixed+ΔH performance (−10.17→−9.92 dB). The aux losses reshape expert behavior rather than strengthening individual experts.
+
+7. **Safe Fallback is structure-verified, not safety-verified.** All-invalid → c=0
+   is structurally guaranteed. However, the full corruption audit (phase error,
+   coherent false, jitter, dropout) has only been run on the old Gate 2-C / NMS
+   pipeline, NOT on the canonical OMP+Conv2d Refiner + Safe Fallback pipeline.
+   See P2 below.
+
+---
+
+## Immediate Next Steps (Priority-Ordered)
+
+**P0: Unify Refiner + Safe Fallback onto a single canonical backbone.**
+Same OMP+Conv2d Refiner, same seed/test-bank/epochs, old gate vs safe fallback
+paired comparison with hierarchical bootstrap. Answers: what is the clean-NMSE
+cost of structural safety on the best pipeline?
+
+**P1: Token error causal decomposition (4-cell oracle experiment).**
+Case A: true {τ,ν,α} (done), Case B: true {τ,ν} + LS-α, Case C: refined
+{τ,ν} + true α, Case D: refined {τ,ν} + LS-α (done). Case C is critical —
+it isolates position+support error from gain error.
+
+**P2: Corruption audit on canonical Safe+Refiner model.**
+Per-sample TF baseline, harm rate, worst-10%, max degradation, paired CI.
+Conditions: clean, all-null, dropout, jitter, phase, coherent false, natural
+OMP errors. all-null must satisfy max_i |H_out,i − H_TF,i|_∞ < 1e-7.
+
+**P3: Unknown-K detection (Gate 0-B).**
+OMP stopping rule, over/under-detection, false path handling, adaptive valid
+mask. Current results all assume Known-K.
 
 ---
 
