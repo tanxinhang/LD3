@@ -1,0 +1,75 @@
+# Gate 2 Canonical: unified OMP+Conv2d Refiner backbone
+#
+# Single backbone for C0-C5 canonical comparison table.
+# Toggle safe_fallback to switch between old gate (False) and safe fallback (True).
+#
+# C0: Physics only  (use_residual=False, fix_c=1, safe_fallback=True)
+# C1: +Refiner      (use_residual=False, fix_c=1, safe_fallback=True)
+# C2: +Residual     (fix_c=1, safe_fallback=True)
+# C3: Old gate      (safe_fallback=False, trained from scratch)
+# C4: Safe fallback (safe_fallback=True,  trained from scratch)
+# C5: Fixed λ       (fix_c=λ, safe_fallback=True)
+#
+# Usage:
+#   # Train C4 (safe fallback, default):
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_canonical.yaml \
+#     --output-dir results/gate2_canonical_safe --device cuda --models physics_residual
+#
+#   # Train C3 (old gate):
+#   python experiments/gate1_oracle.py \
+#     --config configs/gate2_canonical.yaml \
+#     --output-dir results/gate2_canonical_old --device cuda --models physics_residual
+
+seed: 2036
+device: cuda
+
+ofdm:
+  num_subcarriers: 64
+  num_symbols: 14
+  subcarrier_spacing_hz: 120000.0
+  carrier_frequency_hz: 28000000000.0
+  cp_ratio: 0.07
+
+channel:
+  num_paths: 4
+  max_delay_bins: 12.0
+  max_abs_doppler_bins: 3.0
+  fractional_delay: true
+  fractional_doppler: true
+  exponential_power_decay: 0.25
+
+dataset:
+  train_size: 4096
+  test_size: 1024
+  val_size: 1024
+  snr_min_db: 10.0
+  snr_max_db: 10.0
+  pilot_density: 0.125
+  pilot_pattern: random
+  max_paths: 8
+  token_version: 2           # 9-dim scalar — optimal for fusion gate
+  token_source: estimated
+  token_refine: ""           # NO VP — Refiner does fractional correction
+  detector_method: omp       # OMP replaces NMS
+
+training:
+  epochs: 300
+  batch_size: 64
+  learning_rate: 0.001
+  weight_decay: 0.00001
+  hidden_dim: 48
+  num_threads: 4
+  num_seeds: 3
+  use_quality_gate: true
+  use_path_stats: true
+  use_token_refiner: true    # Conv2d DDTokenRefiner
+  gate_kernel_size: 3
+  zero_init_residual: true
+  safe_fallback: true        # True=C4 (safe), False=C3 (old gate)
+  loss_weights:
+    final: 1.0
+    tf_aux: 0.1              # Light aux — prevent TF branch degradation
+    physical_aux: 0.0
+  token_augmentation:
+    enabled: false
